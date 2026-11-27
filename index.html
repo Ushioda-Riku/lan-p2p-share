@@ -5,10 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="referrer" content="no-referrer">
   <title>AirShare</title>
-  <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
-  <script src="https://unpkg.com/mqtt@5.10.3/dist/mqtt.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/mqtt@5.10.3/dist/mqtt.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" crossorigin="anonymous"></script>
   <style>
     :root {
       --bg-light: #f5f5f7;
@@ -613,6 +614,7 @@
       display: flex;
       flex-direction: column;
       gap: 10px;
+      contain: layout style paint;
     }
 
     .file-item.is-sent {
@@ -902,8 +904,7 @@
 
 <script>
 const PEER_PREFIX = "lanp2p-share-";
-const STORAGE_MY_ID = "airshare_my_id";
-const STORAGE_PAIRED_PEER = "airshare_paired_peer";
+const HEADER_LEN = 16;
 const MQTT_BROKERS = [
   "wss://broker.emqx.io:8084/mqtt",
   "wss://broker.hivemq.com:8884/mqtt",
@@ -917,6 +918,7 @@ const RELAY_CHUNK_SIZE = 32 * 1024;
 const SLAB_SIZE = 1024 * 1024;
 const SACK_INTERVAL = 8;
 const COMPACT_CHUNK_BATCH = 128;
+const FEC_GROUP_SIZE = 16;
 
 const CONNECT_TIMEOUT_MS = 12000;
 const MAX_RECONNECT_ATTEMPTS = 5;
@@ -924,6 +926,7 @@ const RECONNECT_DELAYS = [600, 2000, 4500, 8000, 12000];
 
 const HAS_COMPRESSION_STREAMS = typeof CompressionStream === "function" && typeof DecompressionStream === "function";
 const ENTROPY_HIST = new Uint16Array(256);
+const LZ4_HASH_TABLE = new Int32Array(4096);
 
 let myId = "";
 let peer = null;
@@ -931,8 +934,8 @@ let peerReady = false;
 let p2pLanes = new Map();
 
 const brokerSlots = [
-  { id: 0, brokerIdx: 0, client: null, ready: false, inflight: 0, cwnd: 24, inflightHi: 72, minRtt: 120, ewmaRtt: 120, lastCongestionAt: 0 },
-  { id: 1, brokerIdx: 1, client: null, ready: false, inflight: 0, cwnd: 24, inflightHi: 72, minRtt: 120, ewmaRtt: 120, lastCongestionAt: 0 }
+  { id: 0, brokerIdx: 0, client: null, ready: false, inflight: 0, cwnd: 24, inflightHi: 72, minRtt: 120, ewmaRtt: 120, lastCongestionAt: 0, nextPathPn: 1 },
+  { id: 1, brokerIdx: 1, client: null, ready: false, inflight: 0, cwnd: 24, inflightHi: 72, minRtt: 120, ewmaRtt: 120, lastCongestionAt: 0, nextPathPn: 1 }
 ];
 let nextFailoverBrokerIdx = 2;
 let currentInboxTopic = "";
@@ -971,7 +974,15 @@ let p2pRecvChain = Promise.resolve();
 let relayCtrlChain = Promise.resolve();
 let sendQueue = Promise.resolve();
 
-let copyTipTimer = null;
+const activeObjectUrls = new Set();
+let canShareFilesCache = null;
+
+window.addEventListener("pagehide", () => {
+  for (const u of activeObjectUrls) {
+    try { URL.revokeObjectURL(u); } catch {}
+  }
+  activeObjectUrls.clear();
+});
 let lastCopyMessage = "";
 let sendRafScheduled = false;
 let recvRafScheduled = false;
@@ -982,34 +993,20 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 window.addEventListener("DOMContentLoaded", () => {
-  const savedId = normalizeCode(sessionStorage.getItem(STORAGE_MY_ID));
-  myId = savedId.length === 5 ? savedId : generateCode();
-  sessionStorage.setItem(STORAGE_MY_ID, myId);
+  myId = generateCode();
   renderMyCode(myId);
   setupUIEvents();
 
   cryptoInitPromise = initCrypto();
+  initRxWorkerPool();
   startAllBrokers();
   initPeerJS();
 
   const urlParams = new URLSearchParams(window.location.search);
   const autoTargetId = normalizeCode(urlParams.get("connect"));
   if (autoTargetId.length === 5 && autoTargetId !== myId) {
-    sessionStorage.removeItem(STORAGE_PAIRED_PEER);
     document.getElementById("targetId").value = autoTargetId;
     connectToPeer(autoTargetId);
-    return;
-  }
-
-  const savedPeer = normalizeCode(sessionStorage.getItem(STORAGE_PAIRED_PEER));
-  if (savedPeer.length === 5 && savedPeer !== myId) {
-    pairedPeerId = savedPeer;
-    document.getElementById("connectPanel").classList.add("hidden");
-    document.getElementById("transferPanel").classList.remove("hidden");
-    const selfLabel = document.getElementById("selfIdLabel");
-    if (selfLabel) selfLabel.textContent = myId;
-    document.getElementById("peerIdLabel").textContent = savedPeer;
-    startAutoReconnect(true);
   }
 });
 
@@ -1039,6 +1036,11 @@ function sleep(ms) {
 }
 
 function generateCode() {
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const buf = new Uint32Array(1);
+    crypto.getRandomValues(buf);
+    return String(10000 + (buf[0] % 90000));
+  }
   return Math.floor(10000 + Math.random() * 90000).toString();
 }
 
@@ -1158,7 +1160,14 @@ function setConnectingUI(isConnecting) {
   cancelBtn.classList.toggle("hidden", !isConnecting);
 }
 
-// === Information-Theoretic Pre-Scan & Adaptive Per-Chunk Deflate ===
+async function yieldToMain() {
+  if (typeof window !== "undefined" && window.scheduler && typeof window.scheduler.yield === "function") {
+    return await window.scheduler.yield();
+  }
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+// === Information-Theoretic Pre-Scan & Zero-Alloc TypedArray LZ4 Block Codec ===
 function isConstantChunk(bytes) {
   const n = bytes.length;
   if (n < 64) return false;
@@ -1194,6 +1203,157 @@ function estimateShannonEntropy(bytes) {
   return h;
 }
 
+function lz4CompressBlock(src) {
+  const n = src.length;
+  if (n < 16) return null;
+  const limitOut = 4 + Math.floor(n * 0.92);
+  const out = new Uint8Array(limitOut + 64);
+  new DataView(out.buffer).setUint32(0, n >>> 0, false);
+  let oPos = 4;
+
+  LZ4_HASH_TABLE.fill(-1);
+  let anchor = 0;
+  let sPos = 0;
+  const mflimit = n - 12;
+  const matchLimit = n - 5;
+
+  while (sPos <= mflimit) {
+    const seq4 = src[sPos] | (src[sPos + 1] << 8) | (src[sPos + 2] << 16) | (src[sPos + 3] << 24);
+    const h = (Math.imul(seq4, 2654435761) >>> 20) & 0xfff;
+    const ref = LZ4_HASH_TABLE[h];
+    LZ4_HASH_TABLE[h] = sPos;
+
+    if (
+      ref < 0 ||
+      (sPos - ref) > 65535 ||
+      src[ref] !== src[sPos] ||
+      src[ref + 1] !== src[sPos + 1] ||
+      src[ref + 2] !== src[sPos + 2] ||
+      src[ref + 3] !== src[sPos + 3]
+    ) {
+      sPos++;
+      continue;
+    }
+
+    const offset = sPos - ref;
+    const litLen = sPos - anchor;
+    let matchLen = 4;
+    while (sPos + matchLen < matchLimit && src[ref + matchLen] === src[sPos + matchLen]) {
+      matchLen++;
+    }
+    const matchExtra = matchLen - 4;
+
+    const estSize = oPos + 1 + Math.floor(litLen / 255) + litLen + 2 + Math.floor(matchExtra / 255) + 4;
+    if (estSize >= limitOut) return null;
+
+    const tokPos = oPos++;
+    let token = litLen >= 15 ? 0xf0 : (litLen << 4);
+    if (litLen >= 15) {
+      let rem = litLen - 15;
+      while (rem >= 255) { out[oPos++] = 255; rem -= 255; }
+      out[oPos++] = rem;
+    }
+    if (litLen > 0) {
+      out.set(src.subarray(anchor, sPos), oPos);
+      oPos += litLen;
+    }
+
+    out[oPos++] = offset & 0xff;
+    out[oPos++] = (offset >>> 8) & 0xff;
+
+    if (matchExtra >= 15) {
+      token |= 0x0f;
+      let remM = matchExtra - 15;
+      while (remM >= 255) { out[oPos++] = 255; remM -= 255; }
+      out[oPos++] = remM;
+    } else {
+      token |= matchExtra;
+    }
+    out[tokPos] = token;
+
+    anchor = sPos + matchLen;
+    sPos = anchor;
+  }
+
+  const lastLit = n - anchor;
+  const estTail = oPos + 1 + Math.floor(lastLit / 255) + 1 + lastLit;
+  if (estTail >= limitOut) return null;
+
+  const tokPos = oPos++;
+  if (lastLit >= 15) {
+    out[tokPos] = 0xf0;
+    let rem = lastLit - 15;
+    while (rem >= 255) { out[oPos++] = 255; rem -= 255; }
+    out[oPos++] = rem;
+  } else {
+    out[tokPos] = lastLit << 4;
+  }
+  if (lastLit > 0) {
+    out.set(src.subarray(anchor, n), oPos);
+    oPos += lastLit;
+  }
+  return out.subarray(0, oPos);
+}
+
+function lz4DecompressBlock(body) {
+  if (body.length < 5) throw new Error("LZ4 body too short");
+  const origLen = new DataView(body.buffer, body.byteOffset, body.byteLength).getUint32(0, false);
+  if (origLen === 0) return new Uint8Array(0);
+  if (origLen > 8 * 1024 * 1024) throw new Error("LZ4 size limit");
+
+  const dst = new Uint8Array(origLen);
+  let bPos = 4;
+  let dPos = 0;
+
+  while (bPos < body.length) {
+    const token = body[bPos++];
+    let litLen = token >>> 4;
+    if (litLen === 15) {
+      let b;
+      do {
+        if (bPos >= body.length) throw new Error("LZ4 lit overflow");
+        b = body[bPos++];
+        litLen += b;
+      } while (b === 255);
+    }
+    if (litLen > 0) {
+      if (bPos + litLen > body.length || dPos + litLen > origLen) throw new Error("LZ4 lit bounds");
+      dst.set(body.subarray(bPos, bPos + litLen), dPos);
+      bPos += litLen;
+      dPos += litLen;
+    }
+    if (bPos >= body.length) break;
+    if (bPos + 2 > body.length) throw new Error("LZ4 offset trunc");
+    const offset = body[bPos] | (body[bPos + 1] << 8);
+    bPos += 2;
+    if (offset === 0 || offset > dPos) throw new Error("LZ4 invalid offset");
+
+    let matchLen = (token & 0x0f) + 4;
+    if ((token & 0x0f) === 15) {
+      let b;
+      do {
+        if (bPos >= body.length) throw new Error("LZ4 match overflow");
+        b = body[bPos++];
+        matchLen += b;
+      } while (b === 255);
+    }
+    if (dPos + matchLen > origLen) throw new Error("LZ4 match bounds");
+
+    const mPos = dPos - offset;
+    if (offset >= matchLen) {
+      dst.copyWithin(dPos, mPos, mPos + matchLen);
+      dPos += matchLen;
+    } else {
+      for (let i = 0; i < matchLen; i++) {
+        dst[dPos + i] = dst[mPos + i];
+      }
+      dPos += matchLen;
+    }
+  }
+  if (dPos !== origLen) throw new Error("LZ4 incomplete");
+  return dst;
+}
+
 async function runStreamTransform(bytes, ctor) {
   const cs = new ctor("deflate-raw");
   const writer = cs.writable.getWriter();
@@ -1217,28 +1377,101 @@ async function runStreamTransform(bytes, ctor) {
   return out;
 }
 
-async function prepareOutgoingPayload(chunkBytes, canDeflate) {
+function prepareOutgoingPayload(chunkBytes) {
   if (isConstantChunk(chunkBytes)) {
     const sparse = new Uint8Array(5);
     sparse[0] = chunkBytes[0];
     new DataView(sparse.buffer).setUint32(1, chunkBytes.length, false);
     return { frameType: 0x04, body: sparse };
   }
-  if (canDeflate && chunkBytes.length >= 512) {
+  if (chunkBytes.length >= 512) {
     const h = estimateShannonEntropy(chunkBytes);
-    if (h < 7.20) {
-      try {
-        const compressed = await runStreamTransform(chunkBytes, CompressionStream);
-        if (compressed.byteLength < chunkBytes.length * 0.92) {
-          return { frameType: 0x03, body: compressed };
-        }
-      } catch {}
+    if (h < 7.30) {
+      const lz4 = lz4CompressBlock(chunkBytes);
+      if (lz4) return { frameType: 0x05, body: lz4 };
     }
   }
   return { frameType: 0x02, body: chunkBytes };
 }
 
-// === Web Crypto (ECDH P-256 + AES-256-GCM + TLS 1.3 Deterministic XOR-Nonce AEAD) ===
+// === Web Crypto (ECDH P-256 + AES-256-GCM + XOR-Nonce AEAD + 2-Worker Offload Pool) ===
+const rxWorkers = [];
+const rxWorkerPending = new Map();
+let nextRxJobId = 1;
+
+function initRxWorkerPool() {
+  if (rxWorkers.length > 0) return;
+  if (typeof Worker !== "function" || typeof window === "undefined" || !window.isSecureContext) return;
+  const code = `"use strict";
+const HEADER_LEN = ${HEADER_LEN};
+let wAesKey = null;
+${deriveChunkNonce.toString()}
+${lz4DecompressBlock.toString()}
+${runStreamTransform.toString()}
+self.onmessage = async (ev) => {
+  const m = ev.data;
+  if (m.op === "setKey") { wAesKey = m.key; return; }
+  if (m.op === "decodeRelay") {
+    try {
+      if (!wAesKey) throw new Error("No key");
+      const bytes = new Uint8Array(m.pktAb);
+      const salt = new Uint8Array(m.saltAb);
+      const header = bytes.subarray(0, HEADER_LEN);
+      const frameType = bytes[0];
+      const attemptGen = bytes[2];
+      const hv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const seq = hv.getUint32(4, false);
+      const sentMs32 = hv.getUint32(8, false);
+      const iv = deriveChunkNonce(salt, frameType, seq, attemptGen);
+      const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: header }, wAesKey, bytes.subarray(HEADER_LEN));
+      let chunk = new Uint8Array(plainBuf);
+      if (frameType === 0x05) {
+        chunk = lz4DecompressBlock(chunk);
+      } else if (frameType === 0x04) {
+        if (chunk.length < 5) throw new Error("Sparse trunc");
+        const fill = chunk[0];
+        const len = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength).getUint32(1, false);
+        const out = new Uint8Array(len);
+        if (fill !== 0) out.fill(fill);
+        chunk = out;
+      } else if (frameType === 0x03) {
+        chunk = await runStreamTransform(chunk, DecompressionStream);
+      }
+      const copyOut = chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength ? chunk.buffer : chunk.slice().buffer;
+      self.postMessage({ id: m.id, ok: true, frameType, seq, sentMs32, chunkAb: copyOut }, [copyOut]);
+    } catch {
+      self.postMessage({ id: m.id, ok: false });
+    }
+  }
+};`;
+  try {
+    const url = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+    for (let i = 0; i < 2; i++) {
+      const w = new Worker(url);
+      const entry = { worker: w, busy: 0 };
+      w.onmessage = (ev) => {
+        entry.busy = Math.max(0, entry.busy - 1);
+        const job = rxWorkerPending.get(ev.data.id);
+        if (!job) return;
+        rxWorkerPending.delete(ev.data.id);
+        if (ev.data.ok) job.resolve(ev.data);
+        else job.reject(new Error("Worker decode failed"));
+      };
+      w.onerror = () => {};
+      rxWorkers.push(entry);
+    }
+    URL.revokeObjectURL(url);
+  } catch {
+    rxWorkers.length = 0;
+  }
+}
+
+function broadcastAesKeyToWorkers(aesKey) {
+  for (const w of rxWorkers) {
+    try { w.worker.postMessage({ op: "setKey", key: aesKey }); } catch {}
+  }
+}
+
 function bytesToBase64(bytes) {
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
@@ -1301,45 +1534,50 @@ async function decryptControlPacket(bytes) {
   return new Uint8Array(plainBuf);
 }
 
-function deriveChunkNonce(salt, seq, attemptGen) {
+function deriveChunkNonce(salt, frameType, seq, attemptGen) {
   const iv = new Uint8Array(salt);
+  iv[6] ^= (frameType & 0xff);
   iv[7] ^= (attemptGen & 0xff);
   const view = new DataView(iv.buffer, iv.byteOffset, iv.byteLength);
   view.setUint32(8, (view.getUint32(8, false) ^ seq) >>> 0, false);
   return iv;
 }
 
-async function encryptChunkWithXorNonce(salt, frameType, seq, sentMs32, attemptGen, txSlot, bodyBytes) {
-  const header = new Uint8Array(11);
+async function encryptChunkWithXorNonce(salt, frameType, seq, sentMs32, attemptGen, txSlot, slotId, pathPn, bodyBytes) {
+  const header = new Uint8Array(HEADER_LEN);
   header[0] = frameType;
+  header[1] = txSlot & 0xff;
+  header[2] = attemptGen & 0xff;
+  header[3] = slotId & 0xff;
   const hView = new DataView(header.buffer);
-  hView.setUint32(1, seq, false);
-  hView.setUint32(5, sentMs32 >>> 0, false);
-  header[9] = attemptGen & 0xff;
-  header[10] = txSlot & 0xff;
+  hView.setUint32(4, seq >>> 0, false);
+  hView.setUint32(8, sentMs32 >>> 0, false);
+  hView.setUint32(12, pathPn >>> 0, false);
 
-  const iv = deriveChunkNonce(salt, seq, attemptGen);
+  const iv = deriveChunkNonce(salt, frameType, seq, attemptGen);
   const encrypted = new Uint8Array(
     await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: header }, sharedAesKey, bodyBytes)
   );
-  const packet = new Uint8Array(11 + encrypted.length);
+  const packet = new Uint8Array(HEADER_LEN + encrypted.length);
   packet.set(header, 0);
-  packet.set(encrypted, 11);
+  packet.set(encrypted, HEADER_LEN);
   return packet;
 }
 
 async function decryptChunkWithXorNonce(salt, bytes) {
-  const header = bytes.subarray(0, 11);
+  const header = bytes.subarray(0, HEADER_LEN);
   const frameType = bytes[0];
+  const txSlot = bytes[1];
+  const attemptGen = bytes[2];
+  const slotId = bytes[3];
   const hView = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const seq = hView.getUint32(1, false);
-  const sentMs32 = hView.getUint32(5, false);
-  const attemptGen = bytes[9];
-  const txSlot = bytes[10];
-  const ciphertext = bytes.subarray(11);
-  const iv = deriveChunkNonce(salt, seq, attemptGen);
+  const seq = hView.getUint32(4, false);
+  const sentMs32 = hView.getUint32(8, false);
+  const pathPn = hView.getUint32(12, false);
+  const ciphertext = bytes.subarray(HEADER_LEN);
+  const iv = deriveChunkNonce(salt, frameType, seq, attemptGen);
   const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: header }, sharedAesKey, ciphertext);
-  return { frameType, seq, sentMs32, txSlot, body: new Uint8Array(plainBuf) };
+  return { frameType, txSlot, slotId, seq, sentMs32, pathPn, body: new Uint8Array(plainBuf) };
 }
 
 // === Dual-Broker Simultaneous WSS Signaling & Multipath Relay ===
@@ -1497,6 +1735,7 @@ async function handleInboxMessage(msg) {
     try {
       await cryptoInitPromise;
       sharedAesKey = await deriveAesKey(msg.pubKey);
+      broadcastAesKeyToWorkers(sharedAesKey);
       const nextIn = `lanp2p-v2/stream/${msg.attemptId}/from-${msg.from}`;
       const nextOut = `lanp2p-v2/stream/${msg.attemptId}/from-${myId}`;
       if (relayInTopic && relayInTopic !== nextIn) {
@@ -1523,6 +1762,7 @@ async function handleInboxMessage(msg) {
     seenAttemptIds.add(ackKey);
     try {
       sharedAesKey = await deriveAesKey(msg.pubKey);
+      broadcastAesKeyToWorkers(sharedAesKey);
       const nextIn = `lanp2p-v2/stream/${msg.attemptId}/from-${msg.from}`;
       const nextOut = `lanp2p-v2/stream/${msg.attemptId}/from-${myId}`;
       if (relayInTopic && relayInTopic !== nextIn) {
@@ -1578,7 +1818,6 @@ function initPeerJS() {
       try { peer.destroy(); } catch {}
       peerReady = false;
       myId = generateCode();
-      sessionStorage.setItem(STORAGE_MY_ID, myId);
       renderMyCode(myId);
       if (hasAnyMqttReady()) {
         const oldInbox = currentInboxTopic;
@@ -1666,6 +1905,12 @@ function attachWebRtcConn(conn) {
   });
 
   if (conn.peerConnection) {
+    conn.peerConnection.addEventListener("datachannel", (ev) => {
+      if (ev.channel) {
+        ev.channel.binaryType = "arraybuffer";
+        ev.channel.bufferedAmountLowThreshold = P2P_LOW_WATER;
+      }
+    });
     conn.peerConnection.addEventListener("iceconnectionstatechange", () => {
       const state = conn.peerConnection.iceConnectionState;
       if ((state === "disconnected" || state === "failed") && p2pLanes.get(laneKey) === conn) {
@@ -1853,7 +2098,6 @@ function enterConnectedState(remoteId, mode) {
   clearConnectionTimers();
   connectingTargetId = null;
   pairedPeerId = remoteId;
-  sessionStorage.setItem(STORAGE_PAIRED_PEER, remoteId);
   connState = "connected";
   reconnectAttempt = 0;
 
@@ -1933,8 +2177,7 @@ function resetToConnectPanel(statusMsg = "") {
   isDirectP2P = false;
   isRelayReady = false;
   sharedAesKey = null;
-
-  sessionStorage.removeItem(STORAGE_PAIRED_PEER);
+  broadcastAesKeyToWorkers(null);
 
   if (relayInTopic) {
     for (const s of brokerSlots) {
@@ -2043,6 +2286,10 @@ function createSlabReader(file, chunkSize) {
   }
 
   return {
+    chunkSize,
+    prefetchZero() {
+      loadSlab(0);
+    },
     getChunkSync(seq) {
       const start = seq * chunkSize;
       if (start >= file.size) return new Uint8Array(0);
@@ -2079,14 +2326,16 @@ function buildControlFrame(obj) {
 }
 
 function buildP2PChunkFrame(frameType, seq, bodyBytes, sentMs32, attemptGen, txSlot) {
-  const frame = new Uint8Array(11 + bodyBytes.length);
+  const frame = new Uint8Array(HEADER_LEN + bodyBytes.length);
   frame[0] = frameType;
+  frame[1] = txSlot & 0xff;
+  frame[2] = attemptGen & 0xff;
+  frame[3] = 0xff;
   const view = new DataView(frame.buffer);
-  view.setUint32(1, seq, false);
-  view.setUint32(5, sentMs32 >>> 0, false);
-  frame[9] = attemptGen & 0xff;
-  frame[10] = txSlot & 0xff;
-  frame.set(bodyBytes, 11);
+  view.setUint32(4, seq >>> 0, false);
+  view.setUint32(8, sentMs32 >>> 0, false);
+  view.setUint32(12, 0, false);
+  frame.set(bodyBytes, HEADER_LEN);
   return frame;
 }
 
@@ -2166,17 +2415,38 @@ function sendFiles(files, onAfterDone) {
     });
 }
 
+function xorInto(dst, src) {
+  const n = src.length;
+  let i = 0;
+  if (((dst.byteOffset | src.byteOffset) & 3) === 0 && n >= 4) {
+    const d32 = new Uint32Array(dst.buffer, dst.byteOffset, n >>> 2);
+    const s32 = new Uint32Array(src.buffer, src.byteOffset, n >>> 2);
+    for (let k = 0; k < s32.length; k++) d32[k] ^= s32[k];
+    i = s32.length << 2;
+  }
+  for (; i < n; i++) dst[i] ^= src[i];
+}
+
 async function processSendQueue(files) {
   const progressBox = document.getElementById("sendProgressBox");
   progressBox.style.display = "block";
 
+  let nextReader = null;
   for (let idx = 0; idx < files.length; idx++) {
     const file = files[idx];
     await ensureConnected(10000);
 
+    const estChunk = hasOpenP2P() ? getNegotiatedP2PChunkSize() : RELAY_CHUNK_SIZE;
+    const curReader = nextReader && nextReader.chunkSize === estChunk ? nextReader : null;
+    nextReader = null;
+    if (idx + 1 < files.length && files[idx + 1].size > 0) {
+      nextReader = createSlabReader(files[idx + 1], estChunk);
+      nextReader.prefetchZero();
+    }
+
     const startedAt = nowMs();
     scheduleSendUi(file.name, 0, file.size, startedAt);
-    await sendFileUnified(file, startedAt);
+    await sendFileUnified(file, startedAt, curReader);
     addFileToList(file.name, file.size, file.type, file, "送信");
   }
 
@@ -2208,7 +2478,20 @@ function pickEcfBrokerSlot(excludeSlotId = -1) {
   return best;
 }
 
-async function sendFileUnified(file, startedAt) {
+function getFastestReadyBroker() {
+  const ready = getReadyBrokers();
+  let fastestSlot = null;
+  let fastestRtt = Infinity;
+  for (const s of ready) {
+    if (s.ewmaRtt < fastestRtt) {
+      fastestRtt = s.ewmaRtt;
+      fastestSlot = s;
+    }
+  }
+  return { readyCount: ready.length, fastestSlot, fastestRtt };
+}
+
+async function sendFileUnified(file, startedAt, preReader = null) {
   const transferId = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
   const txSlot = nextTxSlot;
   nextTxSlot = (nextTxSlot % 255) + 1;
@@ -2224,9 +2507,16 @@ async function sendFileUnified(file, startedAt) {
     salt,
     cumSeq: -1,
     highestSacked: -1,
+    ackedCount: 0,
+    uniqueDispatched: 0,
+    grantSeq: totalChunks > 0 ? Math.min(totalChunks - 1, (startedOnP2P ? 96 : 64) - 1) : -1,
+    lastProgressAt: nowMs(),
     acked: new Uint8Array(totalChunks),
+    dispatched: new Uint8Array(totalChunks),
     sentAt: new Float64Array(totalChunks),
     sentSlot: new Int8Array(totalChunks).fill(-1),
+    sentPathPn: new Uint32Array(totalChunks),
+    highestAckedPathPn: new Uint32Array(brokerSlots.length),
     txCount: new Uint8Array(totalChunks),
     tailCloned: new Uint8Array(totalChunks),
     wake: null,
@@ -2247,10 +2537,15 @@ async function sendFileUnified(file, startedAt) {
     onSack(msg) {
       const now = nowMs();
       const cum = Math.min(totalChunks - 1, msg.cumSeq);
+      if (typeof msg.grantSeq === "number") {
+        this.grantSeq = Math.max(this.grantSeq, Math.min(totalChunks - 1, msg.grantSeq));
+      }
 
       const creditSlot = (seq, rttSample) => {
         const sid = this.sentSlot[seq];
         if (sid >= 0 && sid < brokerSlots.length) {
+          const pn = this.sentPathPn[seq];
+          if (pn > this.highestAckedPathPn[sid]) this.highestAckedPathPn[sid] = pn;
           const slot = brokerSlots[sid];
           if (localSlotInflight[sid] > 0) {
             localSlotInflight[sid] -= 1;
@@ -2269,6 +2564,7 @@ async function sendFileUnified(file, startedAt) {
           } else {
             slot.cwnd = Math.min(slot.inflightHi, slot.cwnd + 1);
           }
+          this.sentSlot[seq] = -2;
         }
       };
 
@@ -2276,13 +2572,16 @@ async function sendFileUnified(file, startedAt) {
         ? ((Math.floor(now) - msg.echoTs) >>> 0)
         : 0;
 
+      const markAcked = (s) => {
+        if (this.acked[s]) return;
+        this.acked[s] = 1;
+        this.ackedCount += 1;
+        this.lastProgressAt = now;
+        creditSlot(s, rttSample);
+      };
+
       if (cum > this.cumSeq) {
-        for (let s = this.cumSeq + 1; s <= cum; s++) {
-          if (!this.acked[s]) {
-            this.acked[s] = 1;
-            creditSlot(s, rttSample);
-          }
-        }
+        for (let s = this.cumSeq + 1; s <= cum; s++) markAcked(s);
         this.cumSeq = cum;
         this.highestSacked = Math.max(this.highestSacked, cum);
       }
@@ -2293,9 +2592,8 @@ async function sendFileUnified(file, startedAt) {
         const seq = this.cumSeq + 1 + bit;
         if (seq >= totalChunks) break;
         const isSet = bit < 32 ? ((lo >>> bit) & 1) : ((hi >>> (bit - 32)) & 1);
-        if (isSet && !this.acked[seq]) {
-          this.acked[seq] = 1;
-          creditSlot(seq, rttSample);
+        if (isSet) {
+          markAcked(seq);
           if (seq > this.highestSacked) this.highestSacked = seq;
         }
       }
@@ -2328,7 +2626,8 @@ async function sendFileUnified(file, startedAt) {
       chunkSize,
       totalChunks,
       saltB64: bytesToBase64(salt),
-      deflateCapable: HAS_COMPRESSION_STREAMS
+      deflateCapable: HAS_COMPRESSION_STREAMS,
+      lz4Capable: true
     }, startedOnP2P);
     if (startedOnP2P || totalChunks === 0) {
       await fileStartPromise;
@@ -2337,18 +2636,35 @@ async function sendFileUnified(file, startedAt) {
     }
 
     if (totalChunks > 0) {
-      const reader = createSlabReader(file, chunkSize);
+      const reader = preReader && preReader.chunkSize === chunkSize ? preReader : createSlabReader(file, chunkSize);
+      const fecGroups = totalChunks > 1 ? Math.ceil(totalChunks / FEC_GROUP_SIZE) : 0;
+      const fecAccum = new Map();
+      const fecContrib = new Uint8Array(totalChunks);
+      const fecCount = new Uint8Array(fecGroups);
+      const fecSent = new Uint8Array(fecGroups);
       const retransmitSet = new Set();
-      let nextSeq = 0;
+      let p2pCursor = 0;
 
       while (txState.cumSeq < totalChunks - 1) {
         if (!hasLiveTransport()) {
           await ensureConnected(15000);
         }
 
+        const loopNow = nowMs();
+        if (txState.grantSeq < totalChunks - 1 && (loopNow - txState.lastProgressAt) > 300) {
+          txState.grantSeq = Math.min(totalChunks - 1, txState.grantSeq + 8);
+          txState.lastProgressAt = loopNow;
+        }
+
         // Seamless mid-file P2P cutover OR primary P2P 3-lane streaming
         if (hasOpenP2P()) {
-          while (retransmitSet.size > 0 || nextSeq < totalChunks) {
+          if (p2pCursor >= totalChunks && txState.cumSeq < totalChunks - 1 && retransmitSet.size === 0) {
+            const cutNow = nowMs();
+            for (let s = txState.cumSeq + 1; s < totalChunks; s++) {
+              if (!txState.acked[s] && cutNow - txState.sentAt[s] > 40) retransmitSet.add(s);
+            }
+          }
+          while (retransmitSet.size > 0 || p2pCursor <= txState.grantSeq) {
             let lane = pickLowestBufferedP2PLane();
             while (!lane || (lane.dataChannel && lane.dataChannel.bufferedAmount >= P2P_HIGH_WATER)) {
               if (!hasOpenP2P()) break;
@@ -2362,43 +2678,51 @@ async function sendFileUnified(file, startedAt) {
               seqToSend = retransmitSet.values().next().value;
               retransmitSet.delete(seqToSend);
             } else {
-              while (nextSeq < totalChunks && txState.acked[nextSeq]) nextSeq++;
-              if (nextSeq >= totalChunks) break;
-              seqToSend = nextSeq++;
+              while (p2pCursor <= txState.grantSeq && txState.acked[p2pCursor]) p2pCursor++;
+              if (p2pCursor > txState.grantSeq) break;
+              seqToSend = p2pCursor++;
             }
 
+            if (!txState.dispatched[seqToSend]) {
+              txState.dispatched[seqToSend] = 1;
+              txState.uniqueDispatched += 1;
+            }
             let chunkBytes = reader.getChunkSync(seqToSend);
             if (!chunkBytes) chunkBytes = await reader.getChunk(seqToSend);
-            const { frameType, body } = await prepareOutgoingPayload(chunkBytes, HAS_COMPRESSION_STREAMS);
+            const { frameType, body } = prepareOutgoingPayload(chunkBytes);
 
             const gen = txState.txCount[seqToSend]++;
             const ts = nowMs();
             txState.sentAt[seqToSend] = ts;
             lane.send(buildP2PChunkFrame(frameType, seqToSend, body, Math.floor(ts), gen, txSlot));
 
-            const doneBytes = Math.min(file.size, Math.max(nextSeq, txState.cumSeq + 1) * chunkSize);
-            scheduleSendUi(file.name, doneBytes, file.size, startedAt);
+            const progressChunks = txState.ackedCount * 0.85 + Math.min(totalChunks, txState.uniqueDispatched) * 0.15;
+            scheduleSendUi(file.name, Math.min(file.size, Math.round(progressChunks * chunkSize)), file.size, startedAt);
+            if (nowMs() - loopNow >= 50) await yieldToMain();
           }
 
           if (txState.cumSeq >= totalChunks - 1) break;
         }
 
-        // Uncapped Dual-Broker ECF Relay Pipeline with Entropy-Adaptive Compression
+        // MPNS Per-Path RACK + OTIAS/BLEST Multipath Relay Pipeline + Homa Grant Window
         if (!hasOpenP2P() && isRelayReady && hasAnyMqttReady()) {
           const now = nowMs();
 
-          const rackLimit = Math.min(nextSeq - 1, txState.highestSacked - 3);
-          for (let s = txState.cumSeq + 1; s <= rackLimit; s++) {
-            if (!txState.acked[s] && txState.sentAt[s] > 0) {
+          // MPNS per-path RACK fast retransmit (prevents cross-broker RTT false retransmits)
+          const rackScanEnd = Math.min(totalChunks - 1, txState.grantSeq);
+          for (let s = txState.cumSeq + 1; s <= rackScanEnd; s++) {
+            if (!txState.acked[s] && txState.dispatched[s] && txState.sentAt[s] > 0) {
               const sid = txState.sentSlot[s];
-              const minWait = sid >= 0 ? Math.max(35, brokerSlots[sid].minRtt * 0.45) : 50;
-              if (now - txState.sentAt[s] > minWait) {
-                retransmitSet.add(s);
+              if (sid >= 0 && sid < brokerSlots.length && txState.highestAckedPathPn[sid] > txState.sentPathPn[s] + 2) {
+                const minWait = Math.max(30, brokerSlots[sid].minRtt * 0.35);
+                if (now - txState.sentAt[s] > minWait) {
+                  retransmitSet.add(s);
+                }
               }
             }
           }
 
-          if (nextSeq >= totalChunks) {
+          if (txState.uniqueDispatched >= totalChunks) {
             const unackedTail = [];
             for (let s = txState.cumSeq + 1; s < totalChunks; s++) {
               if (!txState.acked[s]) unackedTail.push(s);
@@ -2420,26 +2744,22 @@ async function sendFileUnified(file, startedAt) {
             }
           }
 
+          const { readyCount, fastestSlot, fastestRtt } = getFastestReadyBroker();
+          let scanFloor = Math.max(0, txState.cumSeq + 1);
           const batchPromises = [];
-          while (retransmitSet.size > 0 || nextSeq < totalChunks) {
-            let seqToSend;
+
+          while (retransmitSet.size > 0 || scanFloor <= txState.grantSeq) {
+            let seqToSend = -1;
             let isRetry = false;
+            let slot = null;
+
             if (retransmitSet.size > 0) {
               seqToSend = retransmitSet.values().next().value;
+              const excludeSid = txState.sentSlot[seqToSend];
+              slot = pickEcfBrokerSlot(excludeSid) || pickEcfBrokerSlot(-1);
+              if (!slot) break;
               retransmitSet.delete(seqToSend);
               isRetry = true;
-            } else {
-              while (nextSeq < totalChunks && txState.acked[nextSeq]) nextSeq++;
-              if (nextSeq >= totalChunks) break;
-              seqToSend = nextSeq;
-            }
-
-            const excludeSid = isRetry ? txState.sentSlot[seqToSend] : -1;
-            const slot = pickEcfBrokerSlot(excludeSid) || (isRetry ? pickEcfBrokerSlot(-1) : null);
-            if (!slot) break;
-
-            if (!isRetry) nextSeq += 1;
-            else {
               const prevSid = txState.sentSlot[seqToSend];
               if (prevSid >= 0 && prevSid < brokerSlots.length) {
                 if (localSlotInflight[prevSid] > 0) {
@@ -2449,7 +2769,42 @@ async function sendFileUnified(file, startedAt) {
                 if (!txState.tailCloned[seqToSend]) {
                   brokerSlots[prevSid].inflightHi = Math.max(12, Math.floor(brokerSlots[prevSid].cwnd * 0.85));
                 }
+                txState.sentSlot[seqToSend] = -2;
               }
+            } else {
+              while (scanFloor <= txState.grantSeq && (txState.acked[scanFloor] || txState.dispatched[scanFloor])) {
+                scanFloor++;
+              }
+              if (scanFloor > txState.grantSeq) break;
+
+              slot = pickEcfBrokerSlot(-1);
+              if (!slot) break;
+
+              // BLEST Tail Guard: keep tail chunks off severely slower paths
+              const remainingNew = totalChunks - txState.uniqueDispatched;
+              if (readyCount > 1 && fastestSlot && slot.id !== fastestSlot.id &&
+                  slot.ewmaRtt > fastestRtt * 2.0 && remainingNew <= Math.max(4, Math.floor(fastestSlot.cwnd * 0.6))) {
+                break;
+              }
+
+              // OTIAS In-Order Arrival Lead Offset for heterogeneous paths
+              let lead = 0;
+              if (fastestSlot && slot.id !== fastestSlot.id && slot.ewmaRtt > fastestRtt * 1.35) {
+                lead = Math.min(20, Math.floor(((slot.ewmaRtt - fastestRtt) / Math.max(12, fastestRtt)) * Math.max(2, fastestSlot.cwnd * 0.4)));
+              }
+              const startAt = Math.min(txState.grantSeq, scanFloor + lead);
+              for (let s = startAt; s <= txState.grantSeq; s++) {
+                if (!txState.acked[s] && !txState.dispatched[s]) { seqToSend = s; break; }
+              }
+              if (seqToSend < 0 && startAt > scanFloor) {
+                for (let s = scanFloor; s < startAt; s++) {
+                  if (!txState.acked[s] && !txState.dispatched[s]) { seqToSend = s; break; }
+                }
+              }
+              if (seqToSend < 0) break;
+
+              txState.dispatched[seqToSend] = 1;
+              txState.uniqueDispatched += 1;
             }
 
             let chunkBytes = reader.getChunkSync(seqToSend);
@@ -2457,13 +2812,16 @@ async function sendFileUnified(file, startedAt) {
 
             const gen = txState.txCount[seqToSend]++;
             const ts = nowMs();
+            const pn = slot.nextPathPn >>> 0;
+            slot.nextPathPn = slot.nextPathPn >= 0xfffffffe ? 1 : slot.nextPathPn + 1;
             txState.sentAt[seqToSend] = ts;
             txState.sentSlot[seqToSend] = slot.id;
+            txState.sentPathPn[seqToSend] = pn;
             slot.inflight += 1;
             localSlotInflight[slot.id] += 1;
 
-            const p = prepareOutgoingPayload(chunkBytes, HAS_COMPRESSION_STREAMS)
-              .then(({ frameType, body }) => encryptChunkWithXorNonce(salt, frameType, seqToSend, Math.floor(ts), gen, txSlot, body))
+            const { frameType, body } = prepareOutgoingPayload(chunkBytes);
+            const p = encryptChunkWithXorNonce(salt, frameType, seqToSend, Math.floor(ts), gen, txSlot, slot.id, pn, body)
               .then((pkt) => mqttPublishSlot(slot, relayOutTopic, pkt, { qos: 0 }))
               .catch(() => {
                 if (localSlotInflight[slot.id] > 0) {
@@ -2472,14 +2830,42 @@ async function sendFileUnified(file, startedAt) {
                 }
               });
             batchPromises.push(p);
+
+            if (!isRetry && fecGroups > 0 && !fecContrib[seqToSend]) {
+              fecContrib[seqToSend] = 1;
+              const g = seqToSend >>> 4;
+              const gStart = g << 4;
+              const gCount = Math.min(FEC_GROUP_SIZE, totalChunks - gStart);
+              if (gCount >= 2 && !fecSent[g]) {
+                let buf = fecAccum.get(g);
+                if (!buf) {
+                  buf = new Uint8Array(chunkSize);
+                  fecAccum.set(g, buf);
+                }
+                xorInto(buf, chunkBytes);
+                fecCount[g] += 1;
+                if (fecCount[g] === gCount) {
+                  fecSent[g] = 1;
+                  fecAccum.delete(g);
+                  const paritySlot = pickEcfBrokerSlot(slot.id) || slot;
+                  const parityPn = paritySlot.nextPathPn >>> 0;
+                  paritySlot.nextPathPn = paritySlot.nextPathPn >= 0xfffffffe ? 1 : paritySlot.nextPathPn + 1;
+                  const fp = encryptChunkWithXorNonce(salt, 0x06, gStart, Math.floor(ts), 0, txSlot, paritySlot.id, parityPn, buf)
+                    .then((pkt) => mqttPublishSlot(paritySlot, relayOutTopic, pkt, { qos: 0 }))
+                    .catch(() => {});
+                  batchPromises.push(fp);
+                }
+              }
+            }
           }
 
           if (batchPromises.length > 0) {
             await Promise.all(batchPromises);
-            const estBytes = Math.min(file.size, Math.max(nextSeq, txState.cumSeq + 1) * chunkSize);
-            scheduleSendUi(file.name, estBytes, file.size, startedAt);
+            const progressChunks = txState.ackedCount * 0.85 + Math.min(totalChunks, txState.uniqueDispatched) * 0.15;
+            scheduleSendUi(file.name, Math.min(file.size, Math.round(progressChunks * chunkSize)), file.size, startedAt);
             if (txState.cumSeq >= totalChunks - 1) break;
-            if (pickEcfBrokerSlot(-1) && (retransmitSet.size > 0 || nextSeq < totalChunks)) {
+            if (nowMs() - now >= 50) await yieldToMain();
+            if (pickEcfBrokerSlot(-1) && (retransmitSet.size > 0 || scanFloor <= txState.grantSeq)) {
               continue;
             }
           }
@@ -2513,6 +2899,16 @@ async function sendFileUnified(file, startedAt) {
 }
 
 // === Framed File Receiving (Progressive 4 MB Sub-Blob Compaction + Async Decode Gate) ===
+function noteDuplicatePacket(state, transport) {
+  if (!state || state.finalized) return;
+  state.sinceSack += 1;
+  const now = nowMs();
+  if (state.sinceSack >= SACK_INTERVAL && now - state.lastSackAt > 8) {
+    state.sinceSack = 0;
+    emitSack(state, transport);
+  }
+}
+
 function handleEncryptedRelayPacket(rawPayload) {
   if (!sharedAesKey || !rawPayload || rawPayload.byteLength < 2) return;
   const bytes = new Uint8Array(rawPayload.buffer, rawPayload.byteOffset, rawPayload.byteLength);
@@ -2530,32 +2926,65 @@ function handleEncryptedRelayPacket(rawPayload) {
     return;
   }
 
-  if (frameType === 0x02 || frameType === 0x03 || frameType === 0x04) {
-    if (bytes.length < 11) return;
-    const txSlot = bytes[10];
+  if (frameType >= 0x02 && frameType <= 0x06) {
+    if (bytes.length < HEADER_LEN) return;
+    const txSlot = bytes[1];
     const transferId = txSlot > 0 ? txSlotMap.get(txSlot) : null;
     const state = transferId ? incomingTransfers.get(transferId) : (txSlot === 0 ? getRecvState(null) : null);
     if (!state || !state.salt) {
       if (earlyRelayChunks.length < 512) earlyRelayChunks.push(bytes.slice());
       return;
     }
+    const seq = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(4, false);
+    if (frameType === 0x06) {
+      const g = seq >>> 4;
+      if (state.fecParity.has(g) || isFecGroupComplete(state, g)) return;
+    } else if (seq >= state.totalChunks || hasRecvBit(state, seq)) {
+      noteDuplicatePacket(state, "relay");
+      return;
+    }
     decodeEncryptedDataPacket(state, bytes, "relay");
+  }
+}
+
+function finishPendingDecode(state) {
+  state.pendingDecodes -= 1;
+  if (state.pendingDecodes === 0 && state.decodeDrainResolve) {
+    const fn = state.decodeDrainResolve;
+    state.decodeDrainResolve = null;
+    fn();
   }
 }
 
 function decodeEncryptedDataPacket(state, bytes, transport) {
   state.pendingDecodes += 1;
+  if (rxWorkers.length > 0 && transport === "relay") {
+    const wEntry = rxWorkers[0].busy <= rxWorkers[1].busy ? rxWorkers[0] : rxWorkers[1];
+    const id = nextRxJobId++;
+    const pktAb = bytes.slice().buffer;
+    const saltAb = state.salt.slice().buffer;
+    wEntry.busy += 1;
+    new Promise((resolve, reject) => {
+      rxWorkerPending.set(id, { resolve, reject });
+      wEntry.worker.postMessage({ op: "decodeRelay", id, pktAb, saltAb }, [pktAb, saltAb]);
+    })
+      .then((res) => {
+        if (res.frameType === 0x06) {
+          handleDecodedFecParity(state, res.seq >>> 4, new Uint8Array(res.chunkAb), transport);
+        } else {
+          handleDecodedChunk(state, res.seq, res.sentMs32, new Uint8Array(res.chunkAb), transport);
+        }
+      })
+      .catch(() => decryptChunkWithXorNonce(state.salt, bytes)
+        .then(({ frameType, seq, sentMs32, body }) => decodeBodyAndApply(state, frameType, seq, sentMs32, body, transport))
+        .catch(() => {}))
+      .finally(() => finishPendingDecode(state));
+    return;
+  }
   decryptChunkWithXorNonce(state.salt, bytes)
     .then(({ frameType, seq, sentMs32, body }) => decodeBodyAndApply(state, frameType, seq, sentMs32, body, transport))
     .catch(() => {})
-    .finally(() => {
-      state.pendingDecodes -= 1;
-      if (state.pendingDecodes === 0 && state.decodeDrainResolve) {
-        const fn = state.decodeDrainResolve;
-        state.decodeDrainResolve = null;
-        fn();
-      }
-    });
+    .finally(() => finishPendingDecode(state));
 }
 
 function drainEarlyRelayChunks() {
@@ -2563,11 +2992,20 @@ function drainEarlyRelayChunks() {
   const remaining = [];
   while (earlyRelayChunks.length > 0) {
     const bytes = earlyRelayChunks.shift();
-    const txSlot = bytes[10];
+    const frameType = bytes[0];
+    const txSlot = bytes[1];
     const transferId = txSlot > 0 ? txSlotMap.get(txSlot) : null;
     const state = transferId ? incomingTransfers.get(transferId) : (txSlot === 0 ? getRecvState(null) : null);
     if (!state || !state.salt) {
       remaining.push(bytes);
+      continue;
+    }
+    const seq = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(4, false);
+    if (frameType === 0x06) {
+      const g = seq >>> 4;
+      if (state.fecParity.has(g) || isFecGroupComplete(state, g)) continue;
+    } else if (seq >= state.totalChunks || hasRecvBit(state, seq)) {
+      noteDuplicatePacket(state, "relay");
       continue;
     }
     decodeEncryptedDataPacket(state, bytes, "relay");
@@ -2578,22 +3016,20 @@ function drainEarlyRelayChunks() {
 function applyP2PDataPacket(state, bytes) {
   const frameType = bytes[0];
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const seq = view.getUint32(1, false);
-  const sentMs32 = view.getUint32(5, false);
-  const body = bytes.slice(11);
-  if (frameType === 0x02 || frameType === 0x04) {
-    decodeBodyAndApply(state, frameType, seq, sentMs32, body, "p2p");
+  const seq = view.getUint32(4, false);
+  const sentMs32 = view.getUint32(8, false);
+  if (frameType !== 0x06 && (seq >= state.totalChunks || hasRecvBit(state, seq))) {
+    noteDuplicatePacket(state, "p2p");
+    return;
+  }
+  const body = bytes.subarray(HEADER_LEN);
+  if (frameType !== 0x03) {
+    decodeBodySyncOrAsync(state, frameType, seq, sentMs32, body, "p2p");
   } else {
     state.pendingDecodes += 1;
     decodeBodyAndApply(state, frameType, seq, sentMs32, body, "p2p")
-      .finally(() => {
-        state.pendingDecodes -= 1;
-        if (state.pendingDecodes === 0 && state.decodeDrainResolve) {
-          const fn = state.decodeDrainResolve;
-          state.decodeDrainResolve = null;
-          fn();
-        }
-      });
+      .catch(() => {})
+      .finally(() => finishPendingDecode(state));
   }
 }
 
@@ -2602,7 +3038,7 @@ function drainEarlyP2PChunks() {
   const remaining = [];
   while (earlyP2PChunks.length > 0) {
     const bytes = earlyP2PChunks.shift();
-    const txSlot = bytes[10];
+    const txSlot = bytes[1];
     const transferId = txSlot > 0 ? txSlotMap.get(txSlot) : null;
     const state = transferId ? incomingTransfers.get(transferId) : (txSlot === 0 ? getRecvState(null) : null);
     if (!state) {
@@ -2624,9 +3060,9 @@ function handleP2PRawPacket(bytes) {
     return;
   }
 
-  if (frameType === 0x02 || frameType === 0x03 || frameType === 0x04) {
-    if (bytes.length < 11) return;
-    const txSlot = bytes[10];
+  if (frameType >= 0x02 && frameType <= 0x05) {
+    if (bytes.length < HEADER_LEN) return;
+    const txSlot = bytes[1];
     const transferId = txSlot > 0 ? txSlotMap.get(txSlot) : null;
     const state = transferId ? incomingTransfers.get(transferId) : (txSlot === 0 ? getRecvState(null) : null);
     if (!state) {
@@ -2637,23 +3073,40 @@ function handleP2PRawPacket(bytes) {
   }
 }
 
-async function decodeBodyAndApply(state, frameType, seq, sentMs32, body, transport) {
-  if (!state || state.finalized || seq >= state.totalChunks) return;
+function decodeBodySyncOrAsync(state, frameType, seq, sentMs32, body, transport) {
+  if (!state || state.finalized) return;
+  if (frameType === 0x06) {
+    handleDecodedFecParity(state, seq >>> 4, body, transport);
+    return;
+  }
+  if (seq >= state.totalChunks) return;
   let chunk;
   if (frameType === 0x02) {
     chunk = body;
-  } else if (frameType === 0x03) {
-    chunk = await runStreamTransform(body, DecompressionStream);
+  } else if (frameType === 0x05) {
+    try {
+      chunk = lz4DecompressBlock(body);
+    } catch {
+      return;
+    }
   } else if (frameType === 0x04) {
     if (body.length < 5) return;
     const fillByte = body[0];
     const len = new DataView(body.buffer, body.byteOffset, body.byteLength).getUint32(1, false);
     chunk = new Uint8Array(len);
     if (fillByte !== 0) chunk.fill(fillByte);
+  } else if (frameType === 0x03) {
+    return runStreamTransform(body, DecompressionStream)
+      .then((c) => handleDecodedChunk(state, seq, sentMs32, c, transport));
   } else {
     return;
   }
   handleDecodedChunk(state, seq, sentMs32, chunk, transport);
+}
+
+async function decodeBodyAndApply(state, frameType, seq, sentMs32, body, transport) {
+  const res = decodeBodySyncOrAsync(state, frameType, seq, sentMs32, body, transport);
+  if (res && typeof res.then === "function") await res;
 }
 
 function getRecvState(transferId) {
@@ -2701,12 +3154,18 @@ function emitSack(state, transport) {
     }
   }
   state.lastSackAt = now;
+  const rxBudget = transport === "p2p" ? 192 : 96;
+  const grantWindow = Math.max(24, rxBudget - state.pendingDecodes * 2);
+  const grantSeq = state.totalChunks > 0
+    ? Math.min(state.totalChunks - 1, Math.max(-1, state.cumSeq) + grantWindow)
+    : -1;
   sendControlMessage({
     type: "sack",
     transferId: state.meta.transferId,
     cumSeq: state.cumSeq,
     bitmapHi: hi >>> 0,
     bitmapLo: lo >>> 0,
+    grantSeq,
     echoTs: state.lastSenderTs || 0
   }, transport === "p2p");
 }
@@ -2741,6 +3200,7 @@ async function handleControlJson(msg, transport) {
       compactedBlobs: [],
       compactWatermark: 0,
       bitmap: new Uint8Array(Math.ceil(totalChunks / 8)),
+      fecParity: new Map(),
       receivedCount: 0,
       receivedBytes: 0,
       cumSeq: -1,
@@ -2793,6 +3253,66 @@ async function handleControlJson(msg, transport) {
   }
 }
 
+function expectedChunkLen(state, seq) {
+  const cs = state.meta.chunkSize || RELAY_CHUNK_SIZE;
+  return seq === state.totalChunks - 1 ? Math.max(0, state.meta.size - seq * cs) : cs;
+}
+
+function isFecGroupComplete(state, g) {
+  const gStart = g << 4;
+  const gEnd = Math.min(state.totalChunks, gStart + FEC_GROUP_SIZE);
+  for (let s = gStart; s < gEnd; s++) {
+    if (!hasRecvBit(state, s)) return false;
+  }
+  return true;
+}
+
+function tryRecoverFecGroup(state, g, transport) {
+  if (!state || state.finalized) return;
+  const parity = state.fecParity.get(g);
+  if (!parity) return;
+  const gStart = g << 4;
+  const gEnd = Math.min(state.totalChunks, gStart + FEC_GROUP_SIZE);
+  const gCount = gEnd - gStart;
+  if (gCount < 2) {
+    state.fecParity.delete(g);
+    return;
+  }
+  let missingSeq = -1;
+  let haveCount = 0;
+  for (let s = gStart; s < gEnd; s++) {
+    if (hasRecvBit(state, s)) {
+      if (!state.chunks[s]) return;
+      haveCount += 1;
+    } else {
+      missingSeq = s;
+    }
+  }
+  if (haveCount === gCount) {
+    state.fecParity.delete(g);
+    return;
+  }
+  if (missingSeq >= 0 && haveCount === gCount - 1) {
+    const rec = parity.slice();
+    for (let s = gStart; s < gEnd; s++) {
+      if (s !== missingSeq && state.chunks[s]) {
+        xorInto(rec, state.chunks[s]);
+      }
+    }
+    state.fecParity.delete(g);
+    const expLen = expectedChunkLen(state, missingSeq);
+    handleDecodedChunk(state, missingSeq, 0, rec.subarray(0, expLen), transport);
+  }
+}
+
+function handleDecodedFecParity(state, g, parityBuf, transport) {
+  if (!state || state.finalized || isFecGroupComplete(state, g)) return;
+  if (!state.fecParity.has(g)) {
+    state.fecParity.set(g, parityBuf);
+  }
+  tryRecoverFecGroup(state, g, transport);
+}
+
 function handleDecodedChunk(state, seq, sentMs32, chunk, transport) {
   if (!state || state.finalized || seq >= state.totalChunks) return;
   if (sentMs32 > 0) state.lastSenderTs = sentMs32;
@@ -2806,6 +3326,7 @@ function handleDecodedChunk(state, seq, sentMs32, chunk, transport) {
     while (hasRecvBit(state, state.cumSeq + 1)) {
       state.cumSeq += 1;
     }
+    tryRecoverFecGroup(state, seq >>> 4, transport);
     compactContiguousPrefix(state);
     scheduleRecvUi(state.meta.name, state.receivedBytes, state.meta.size, state.startedAt);
   }
@@ -2839,6 +3360,21 @@ function createSvgIcon(symbolId, size = 15) {
   use.setAttribute("href", `#${symbolId}`);
   svg.append(use);
   return svg;
+}
+
+function getCanShareFiles() {
+  if (canShareFilesCache !== null) return canShareFilesCache;
+  try {
+    if (typeof File === "function" && navigator.canShare) {
+      const probe = new File([new Uint8Array(1)], "p.bin", { type: "application/octet-stream" });
+      canShareFilesCache = Boolean(navigator.canShare({ files: [probe] }));
+    } else {
+      canShareFilesCache = false;
+    }
+  } catch {
+    canShareFilesCache = false;
+  }
+  return canShareFilesCache;
 }
 
 function addFileToList(name, size, mime, blob, statusLabel) {
@@ -2882,14 +3418,10 @@ function addFileToList(name, size, mime, blob, statusLabel) {
     li.append(header);
   } else {
     const url = URL.createObjectURL(blob);
+    activeObjectUrls.add(url);
     const isImage = mime && mime.startsWith("image/");
 
-    let shareFile = null;
-    try {
-      shareFile = new File([blob], name, { type: mime || "application/octet-stream" });
-    } catch {}
-
-    if (shareFile && navigator.canShare && navigator.canShare({ files: [shareFile] })) {
+    if (getCanShareFiles()) {
       const shareBtn = document.createElement("button");
       shareBtn.type = "button";
       shareBtn.className = "share-file-btn";
@@ -2897,6 +3429,7 @@ function addFileToList(name, size, mime, blob, statusLabel) {
       shareBtn.append(createSvgIcon("icon-share", 14), document.createTextNode("共有"));
       shareBtn.addEventListener("click", async () => {
         try {
+          const shareFile = new File([blob], name, { type: mime || "application/octet-stream" });
           await navigator.share({ files: [shareFile], title: name });
         } catch {}
       });
@@ -2920,6 +3453,7 @@ function addFileToList(name, size, mime, blob, statusLabel) {
       img.className = "preview-img";
       img.alt = name;
       img.loading = "lazy";
+      img.decoding = "async";
       li.append(img);
     }
   }
