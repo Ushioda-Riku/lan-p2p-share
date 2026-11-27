@@ -2,101 +2,754 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LAN P2P ファイル共有 (Win ⇔ iPhone)</title>
-  <!-- PeerJS & QRCode生成ライブラリ -->
-  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>AirShare — LAN P2P ファイル共有</title>
+  <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
+  <script src="https://unpkg.com/mqtt@5.10.3/dist/mqtt.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>
-    :root { --bg: #121212; --card: #1e1e1e; --accent: #00eaef; --primary: #007bff; --success: #28a745; }
-    body { background-color: var(--bg); color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 15px; text-align: center; }
-    h1 { font-size: 20px; margin-bottom: 15px; color: #eee; }
-    .card { background: var(--card); padding: 20px; border-radius: 12px; margin: 0 auto 15px auto; max-width: 500px; border: 1px solid #333; text-align: left; box-sizing: border-box; }
-    .card h2 { margin-top: 0; font-size: 16px; border-bottom: 1px solid #333; padding-bottom: 8px; }
+    :root {
+      --bg-light: #f2f2f7;
+      --bg-dark: #000000;
+      --card-light: rgba(255, 255, 255, 0.88);
+      --card-dark: rgba(28, 28, 30, 0.88);
+      --card-solid-light: #ffffff;
+      --card-solid-dark: #1c1c1e;
+      --header-light: rgba(242, 242, 247, 0.78);
+      --header-dark: rgba(18, 18, 20, 0.78);
+      --fill-light: rgba(120, 120, 128, 0.12);
+      --fill-dark: rgba(120, 120, 128, 0.24);
+      --text-light: #000000;
+      --text-dark: #ffffff;
+      --subtext-light: rgba(60, 60, 67, 0.65);
+      --subtext-dark: rgba(235, 235, 245, 0.65);
+      --sep-light: rgba(60, 60, 67, 0.14);
+      --sep-dark: rgba(84, 84, 88, 0.45);
+      --blue-light: #007aff;
+      --blue-dark: #0a84ff;
+      --green-light: #34c759;
+      --green-dark: #30d158;
+      --red-light: #ff3b30;
+      --red-dark: #ff453a;
+      --amber-light: #ff9500;
+      --amber-dark: #ff9f0a;
 
-    /* 接続コード表示 */
-    .code-box { background: #000; padding: 12px; font-family: monospace; font-size: 32px; border-radius: 8px; letter-spacing: 4px; text-align: center; display: block; margin: 10px 0; color: var(--accent); border: 1px solid #444; font-weight: bold; }
-    #qrcode { display: flex; justify-content: center; margin: 15px 0; background: #fff; padding: 12px; border-radius: 8px; width: fit-content; margin-left: auto; margin-right: auto; }
+      --bg: var(--bg-light);
+      --card: var(--card-light);
+      --card-solid: var(--card-solid-light);
+      --header-bg: var(--header-light);
+      --fill: var(--fill-light);
+      --text: var(--text-light);
+      --subtext: var(--subtext-light);
+      --sep: var(--sep-light);
+      --blue: var(--blue-light);
+      --green: var(--green-light);
+      --red: var(--red-light);
+      --amber: var(--amber-light);
+      --shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+      --target-size: 24px;
 
-    /* 入力・ボタン */
-    .input-group { display: flex; gap: 10px; margin-top: 10px; }
-    input[type="text"], input[type="tel"] { flex: 1; padding: 12px; background: #2a2a2a; color: white; border: 1px solid #555; border-radius: 8px; font-size: 18px; font-family: monospace; text-align: center; }
-    button { background: var(--primary); color: white; border: none; padding: 12px 20px; cursor: pointer; border-radius: 8px; font-weight: bold; font-size: 15px; transition: opacity 0.2s; }
-    button:active { opacity: 0.7; }
-    button:disabled { background: #555; cursor: not-allowed; }
-    .btn-success { background: var(--success); width: 100%; margin-top: 10px; padding: 15px; font-size: 16px; }
+      color-scheme: light dark;
+    }
 
-    /* ファイルドロップゾーン */
-    #dropZone { border: 2px dashed #555; border-radius: 12px; padding: 30px 15px; text-align: center; cursor: pointer; transition: 0.2s; background: #181818; margin-top: 10px; }
-    #dropZone.dragover { border-color: var(--accent); background: #223033; }
-    #fileInput { display: none; }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: var(--bg-dark);
+        --card: var(--card-dark);
+        --card-solid: var(--card-solid-dark);
+        --header-bg: var(--header-dark);
+        --fill: var(--fill-dark);
+        --text: var(--text-dark);
+        --subtext: var(--subtext-dark);
+        --sep: var(--sep-dark);
+        --blue: var(--blue-dark);
+        --green: var(--green-dark);
+        --red: var(--red-dark);
+        --amber: var(--amber-dark);
+        --shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+      }
+    }
 
-    /* プログレスバー */
-    .progress-container { display: none; margin-top: 15px; }
+    @supports (color: light-dark(white, black)) {
+      :root {
+        --bg: light-dark(var(--bg-light), var(--bg-dark));
+        --card: light-dark(var(--card-light), var(--card-dark));
+        --card-solid: light-dark(var(--card-solid-light), var(--card-solid-dark));
+        --header-bg: light-dark(var(--header-light), var(--header-dark));
+        --fill: light-dark(var(--fill-light), var(--fill-dark));
+        --text: light-dark(var(--text-light), var(--text-dark));
+        --subtext: light-dark(var(--subtext-light), var(--subtext-dark));
+        --sep: light-dark(var(--sep-light), var(--sep-dark));
+        --blue: light-dark(var(--blue-light), var(--blue-dark));
+        --green: light-dark(var(--green-light), var(--green-dark));
+        --red: light-dark(var(--red-light), var(--red-dark));
+        --amber: light-dark(var(--amber-light), var(--amber-dark));
+      }
+    }
+
+    @media (pointer: coarse) {
+      :root {
+        --target-size: 44px;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      background:
+        radial-gradient(circle at 50% -10%, rgba(0, 122, 255, 0.14), transparent 55%),
+        var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Segoe UI", sans-serif;
+      line-height: 1.45;
+      overflow-wrap: break-word;
+    }
+
+    :where(button, input:not([type="checkbox"], [type="radio"]), [role="button"], .dl-btn) {
+      min-block-size: var(--target-size);
+      min-inline-size: var(--target-size);
+    }
+
+    .app-header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      padding: max(14px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
+      background: var(--header-bg);
+      backdrop-filter: saturate(180%) blur(20px);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+      border-bottom: 0.5px solid var(--sep);
+    }
+
+    .header-inner {
+      max-width: 460px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .airdrop-icon {
+      position: relative;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--blue), #5ac8fa);
+      display: grid;
+      place-items: center;
+      color: #fff;
+      flex: none;
+      box-shadow: 0 4px 12px rgba(0, 122, 255, 0.3);
+    }
+
+    .airdrop-icon::after {
+      content: "";
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      border: 1.5px solid var(--blue);
+      opacity: 0;
+      animation: radarPulse 2.6s ease-out infinite;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .airdrop-icon::after {
+        animation: none;
+      }
+    }
+
+    @keyframes radarPulse {
+      0% { transform: scale(0.92); opacity: 0.55; }
+      100% { transform: scale(1.38); opacity: 0; }
+    }
+
+    .brand-text h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      text-wrap: balance;
+    }
+
+    .brand-sub {
+      margin: 0;
+      font-size: 12px;
+      color: var(--subtext);
+    }
+
+    .ready-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--fill);
+      color: var(--subtext);
+      white-space: nowrap;
+      flex: none;
+    }
+
+    .ready-pill .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--amber);
+    }
+
+    .ready-pill.is-ready {
+      background: rgba(52, 199, 89, 0.14);
+      color: var(--green);
+    }
+
+    .ready-pill.is-ready .dot {
+      background: var(--green);
+    }
+
+    main {
+      max-width: 492px;
+      margin: 0 auto;
+      padding: 18px max(16px, env(safe-area-inset-right, 0px)) max(36px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+    }
+
+    .card {
+      background: var(--card);
+      backdrop-filter: saturate(180%) blur(20px);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+      border: 0.5px solid var(--sep);
+      border-radius: 20px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: var(--shadow);
+      text-align: left;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .card h2 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.015em;
+      text-wrap: balance;
+    }
+
+    .note {
+      margin: 0;
+      font-size: 13px;
+      color: var(--subtext);
+      text-wrap: pretty;
+    }
+
+    /* 自分のコード表示 */
+    .passcode-panel {
+      margin: 14px 0;
+      padding: 16px 14px;
+      border-radius: 16px;
+      background: var(--fill);
+      text-align: center;
+    }
+
+    .code-box {
+      display: block;
+      font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+      font-size: 38px;
+      font-weight: 800;
+      letter-spacing: 8px;
+      padding-left: 8px;
+      color: var(--text);
+      user-select: all;
+    }
+
+    .code-actions {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 10px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+
+    .copy-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .pill-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      border: none;
+      background: var(--card-solid);
+      color: var(--blue);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+      transition: transform 0.14s ease, opacity 0.14s ease;
+    }
+
+    .pill-btn:active {
+      transform: scale(0.96);
+      opacity: 0.78;
+    }
+
+    .copy-tip {
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 8px);
+      transform: translateX(-50%) translateY(4px);
+      background: var(--text);
+      color: var(--bg);
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.18s ease, transform 0.18s ease;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    }
+
+    .copy-tip.is-visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    #qrcode {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      margin: 14px auto 4px auto;
+      background: #ffffff;
+      padding: 12px;
+      border-radius: 16px;
+      width: fit-content;
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+    }
+
+    /* 相手コード入力 */
+    .connect-form {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .code-input {
+      width: 100%;
+      padding: 14px 16px;
+      border-radius: 14px;
+      border: 1.5px solid transparent;
+      background: var(--fill);
+      color: var(--text);
+      font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+      font-size: 26px;
+      font-weight: 700;
+      letter-spacing: 6px;
+      text-align: center;
+      outline: none;
+      transition: border-color 0.18s ease, background-color 0.18s ease;
+    }
+
+    .code-input:focus {
+      border-color: var(--blue);
+      background: var(--card-solid);
+    }
+
+    .code-input::placeholder {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", sans-serif;
+      font-size: 15px;
+      font-weight: 500;
+      letter-spacing: 0;
+      color: var(--subtext);
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    .btn-primary, .btn-secondary, .btn-danger {
+      border: none;
+      border-radius: 14px;
+      padding: 13px 18px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: transform 0.14s ease, opacity 0.14s ease;
+    }
+
+    .btn-primary {
+      flex: 1;
+      background: var(--blue);
+      color: #ffffff;
+    }
+
+    .btn-secondary {
+      background: var(--fill);
+      color: var(--text);
+    }
+
+    .btn-danger {
+      padding: 7px 12px;
+      font-size: 13px;
+      border-radius: 999px;
+      background: rgba(255, 59, 48, 0.14);
+      color: var(--red);
+    }
+
+    .btn-primary:active, .btn-secondary:active, .btn-danger:active {
+      transform: scale(0.98);
+      opacity: 0.8;
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.65;
+      cursor: default;
+    }
+
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255, 255, 255, 0.35);
+      border-top-color: #ffffff;
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .status-line {
+      margin-top: 10px;
+      font-size: 13px;
+      color: var(--subtext);
+      min-height: 18px;
+      text-wrap: pretty;
+    }
+
+    .status-line.is-error {
+      color: var(--red);
+      font-weight: 500;
+    }
+
+    /* 転送画面 */
+    .peer-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 11px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: rgba(52, 199, 89, 0.15);
+      color: var(--green);
+    }
+
+    .peer-badge.is-p2p {
+      background: rgba(0, 122, 255, 0.15);
+      color: var(--blue);
+    }
+
+    #dropZone {
+      margin-top: 14px;
+      border: 1.5px dashed var(--sep);
+      border-radius: 16px;
+      padding: 28px 16px;
+      text-align: center;
+      cursor: pointer;
+      background: var(--fill);
+      transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.14s ease;
+    }
+
+    #dropZone:hover, #dropZone:focus-visible {
+      border-color: var(--blue);
+      outline: none;
+    }
+
+    #dropZone.dragover {
+      border-color: var(--blue);
+      background: rgba(0, 122, 255, 0.12);
+      transform: scale(0.99);
+    }
+
+    #fileInput {
+      display: none;
+    }
+
+    .drop-title {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--blue);
+    }
+
+    .progress-container {
+      display: none;
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: var(--fill);
+    }
+
+    .status-text {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .status-text span:first-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     progress {
       appearance: none;
       border: 0 solid;
       overflow: clip;
       width: 100%;
-      height: 12px;
-      border-radius: 6px;
-      background-color: #333;
+      height: 8px;
+      border-radius: 999px;
+      background-color: rgba(120, 120, 128, 0.22);
     }
-    progress::-webkit-progress-bar { background-color: transparent; }
-    progress::-webkit-progress-value { background-color: var(--accent); border-radius: 6px; }
-    progress::-moz-progress-bar { background-color: var(--accent); border-radius: 6px; }
-    .status-text { font-size: 13px; color: #aaa; margin-top: 5px; display: flex; justify-content: space-between; }
 
-    /* ファイル履歴リスト */
-    .file-list { list-style: none; padding: 0; margin: 0; }
-    .file-item { background: #262626; padding: 12px; border-radius: 8px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 8px; border: 1px solid #383838; }
-    .file-header { display: flex; justify-content: space-between; align-items: center; word-break: break-all; }
-    .file-name { font-weight: bold; font-size: 14px; }
-    .file-meta { font-size: 12px; color: #aaa; }
-    .dl-btn { background: var(--success); color: #fff; text-decoration: none; padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: bold; text-align: center; display: inline-block; }
-    .preview-img { max-width: 100%; max-height: 200px; border-radius: 6px; object-fit: contain; background: #000; margin-top: 5px; }
+    progress::-webkit-progress-bar {
+      background-color: transparent;
+    }
 
-    .hidden { display: none !important; }
-    .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
-    .badge-online { background: #1e4620; color: #4caf50; border: 1px solid #4caf50; }
-    .note { font-size: 12px; color: #888; margin-top: 8px; line-height: 1.4; }
+    progress::-webkit-progress-value {
+      background-color: var(--blue);
+      border-radius: 999px;
+      transition: inline-size 0.2s ease;
+    }
+
+    progress::-moz-progress-bar {
+      background-color: var(--blue);
+      border-radius: 999px;
+      transition: inline-size 0.2s ease;
+    }
+
+    /* ファイル履歴 */
+    .file-list {
+      list-style: none;
+      padding: 0;
+      margin: 12px 0 0 0;
+    }
+
+    .file-empty {
+      padding: 20px 12px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--subtext);
+    }
+
+    .file-item {
+      background: var(--fill);
+      padding: 14px;
+      border-radius: 16px;
+      margin-bottom: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .file-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .file-info {
+      min-width: 0;
+      flex: 1 1 180px;
+    }
+
+    .file-name {
+      font-weight: 600;
+      font-size: 14px;
+      word-break: break-word;
+    }
+
+    .file-meta {
+      font-size: 12px;
+      color: var(--subtext);
+      margin-top: 2px;
+    }
+
+    .file-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .dl-btn, .share-file-btn {
+      border: none;
+      border-radius: 999px;
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+    }
+
+    .dl-btn {
+      background: var(--green);
+      color: #ffffff;
+    }
+
+    .share-file-btn {
+      background: var(--blue);
+      color: #ffffff;
+    }
+
+    .preview-img {
+      max-inline-size: 100%;
+      block-size: auto;
+      max-height: 240px;
+      border-radius: 12px;
+      object-fit: contain;
+      background: rgba(0, 0, 0, 0.2);
+    }
+
+    .hidden {
+      display: none !important;
+    }
   </style>
 </head>
 <body>
 
-  <main>
-    <h1>⚡ LAN P2P ファイル共有</h1>
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand">
+        <div class="airdrop-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 20h.01" />
+            <path d="M8.5 16.5a5 5 0 0 1 7 0" />
+            <path d="M5 13a10 10 0 0 1 14 0" />
+            <path d="M2 9.5a15 15 0 0 1 20 0" />
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>AirShare</h1>
+          <p class="brand-sub">Win ⇔ iPhone ファイル共有</p>
+        </div>
+      </div>
+      <span id="readyPill" class="ready-pill" role="status">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="readyText">準備中...</span>
+      </span>
+    </div>
+  </header>
 
+  <main>
     <!-- ① マッチング（接続）画面 -->
     <div id="connectPanel">
-      <div class="card">
-        <h2>自分の接続コード (待機中)</h2>
-        <p class="note">相手側でこの5桁のコードを入力するか、iPhoneのカメラでQRコードを読み取ってください。</p>
-        <span id="myId" class="code-box">-----</span>
-        <div id="qrcode"></div>
-      </div>
-
-      <div class="card">
-        <h2>相手のコードに接続する</h2>
-        <div class="input-group">
-          <input type="tel" id="targetId" placeholder="5桁の数字" maxlength="5" pattern="[0-9]*" inputmode="numeric" aria-label="相手の5桁の接続コード">
-          <button type="button" id="connectBtn">接続</button>
+      <section class="card" aria-labelledby="myCodeHeading">
+        <div class="card-header">
+          <h2 id="myCodeHeading">自分のコード</h2>
         </div>
-        <p id="connStatus" class="note">待機中...</p>
-      </div>
+        <p class="note">相手側でこの5桁のコードを入力するか、iPhone のカメラで QR コードを読み取ってください。</p>
+
+        <div class="passcode-panel">
+          <span id="myId" class="code-box">-----</span>
+          <div class="code-actions">
+            <span class="copy-wrap">
+              <button type="button" id="copyCodeBtn" class="pill-btn" aria-label="自分の接続コードをコピー">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                コードをコピー
+              </button>
+              <span id="copyTip" class="copy-tip" role="status"></span>
+            </span>
+            <button type="button" id="shareLinkBtn" class="pill-btn hidden">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+              リンクを共有
+            </button>
+          </div>
+        </div>
+
+        <div id="qrcode" aria-label="接続用 QR コード"></div>
+      </section>
+
+      <section class="card" aria-labelledby="targetHeading">
+        <div class="card-header">
+          <h2 id="targetHeading">相手に接続</h2>
+        </div>
+        <p class="note">相手の画面に表示されている5桁の数字を入力してください。</p>
+
+        <div class="connect-form">
+          <input type="tel" id="targetId" class="code-input" placeholder="5桁のコードを入力" maxlength="5" pattern="[0-9]*" inputmode="numeric" autocomplete="one-time-code" aria-label="相手の5桁の接続コード">
+          <div class="btn-row">
+            <button type="button" id="connectBtn" class="btn-primary">
+              <span id="connectSpinner" class="spinner hidden" aria-hidden="true"></span>
+              <span id="connectBtnLabel">接続する</span>
+            </button>
+            <button type="button" id="cancelConnectBtn" class="btn-secondary hidden">キャンセル</button>
+          </div>
+        </div>
+        <p id="connStatus" class="status-line" role="status">待機中</p>
+      </section>
     </div>
 
     <!-- ② ファイル転送画面（接続後に表示） -->
     <div id="transferPanel" class="hidden">
-      <div class="card">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <h2 style="margin:0; border:none;">ファイル送信</h2>
-          <span id="peerBadge" class="badge badge-online">🟢 接続済み</span>
+      <section class="card" aria-labelledby="sendHeading">
+        <div class="card-header">
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <h2 id="sendHeading">ファイル送信</h2>
+            <span id="peerBadge" class="peer-badge">🔒 セキュア接続</span>
+          </div>
+          <button type="button" id="disconnectBtn" class="btn-danger">切断</button>
         </div>
 
         <div id="dropZone" role="button" tabindex="0">
-          <p style="margin:0; font-size: 15px; font-weight: bold;">📁 タップしてファイルを選択</p>
-          <p class="note" style="margin:5px 0 0 0;">（PCの場合はここにドラッグ＆ドロップも可能）</p>
+          <p class="drop-title">📁 写真・ファイルを選択</p>
+          <p class="note" style="margin-top: 4px;">タップして選択、またはドラッグ＆ドロップ</p>
           <input type="file" id="fileInput" multiple>
         </div>
 
@@ -117,121 +770,602 @@
           </div>
           <progress id="recvProgress" value="0" max="100" aria-labelledby="recvFileName"></progress>
         </div>
-      </div>
+      </section>
 
-      <div class="card">
-        <h2>送受信履歴</h2>
-        <p class="note" style="margin-top:0;">※iPhoneで画像を保存する場合は、プレビュー画像を長押しして「"写真"に保存」を選択すると便利です。</p>
-        <ul id="fileList" class="file-list"></ul>
-      </div>
+      <section class="card" aria-labelledby="historyHeading">
+        <div class="card-header">
+          <h2 id="historyHeading">送受信履歴</h2>
+        </div>
+        <p class="note">iPhone では「共有 / 写真に保存」または画像長押しでカメラロールに保存できます。</p>
+        <ul id="fileList" class="file-list">
+          <li id="fileEmpty" class="file-empty">まだ送受信されたファイルはありません</li>
+        </ul>
+      </section>
     </div>
   </main>
 
 <script>
+const PEER_PREFIX = "lanp2p-share-";
+const MQTT_BROKERS = [
+  "wss://broker.emqx.io:8084/mqtt",
+  "wss://broker.hivemq.com:8884/mqtt",
+  "wss://test.mosquitto.org:8081"
+];
+const P2P_CHUNK_SIZE = 64 * 1024;
+const RELAY_CHUNK_SIZE = 32 * 1024;
+const RELAY_ACK_INTERVAL = 8;
+const CONNECT_TIMEOUT_MS = 12000;
+
+let myId = "";
 let peer = null;
 let dataConn = null;
-const CHUNK_SIZE = 64 * 1024; // 64KBチャンク（WebRTC安定転送の最適値）
+let mqttClient = null;
+let mqttBrokerIndex = 0;
+let mqttReady = false;
+let peerReady = false;
+let currentInboxTopic = "";
 
-// 受信バッファ用変数
+let connectingTargetId = null;
+let currentAttemptId = null;
+let connectTimeoutTimer = null;
+let retryHelloTimers = [];
+
+let connectedPeerId = null;
+let isDirectP2P = false;
+let isRelayReady = false;
+let relayInTopic = "";
+let relayOutTopic = "";
+
+// Web Crypto (ECDH P-256 + AES-256-GCM)
+let myKeyPair = null;
+let myPubKeyB64 = "";
+let sharedAesKey = null;
+
+// 受信状態
 let incomingFileInfo = null;
 let incomingChunks = [];
 let receivedSize = 0;
+let expectedRelaySeq = 0;
 
-window.addEventListener("DOMContentLoaded", () => {
-  initPeerJS();
+// 送信キュー・ACK待機
+let sendQueue = Promise.resolve();
+let pendingAckWaiter = null;
+
+// Copy tooltip state
+let copyTipTimer = null;
+let lastCopyMessage = "";
+
+window.addEventListener("DOMContentLoaded", async () => {
+  myId = generateCode();
+  renderMyCode(myId);
   setupUIEvents();
+
+  await initCrypto();
+  startMqttClient();
+  initPeerJS();
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const autoTargetId = normalizeCode(urlParams.get("connect"));
+  if (autoTargetId.length === 5 && autoTargetId !== myId) {
+    document.getElementById("targetId").value = autoTargetId;
+    connectToPeer(autoTargetId);
+  }
 });
 
-// === 1. 元コードのマッチングシステム（PeerJS） ===
-function initPeerJS() {
-  const myIdEl = document.getElementById("myId");
-  const connectBtn = document.getElementById("connectBtn");
-  const connStatus = document.getElementById("connStatus");
-  const peerId = Math.floor(10000 + Math.random() * 90000).toString();
+window.addEventListener("pagehide", () => {
+  if (connectedPeerId && mqttClient && mqttReady) {
+    try {
+      mqttClient.publish(`lanp2p-v2/inbox/${connectedPeerId}`, JSON.stringify({ kind: "bye", from: myId }));
+    } catch {}
+  }
+});
 
-  // ★元コードのチューニングを継承: TURNサーバーを排除し、LAN内P2Pを強制
-  peer = new Peer(peerId, {
+function generateCode() {
+  return Math.floor(10000 + Math.random() * 90000).toString();
+}
+
+function normalizeCode(str) {
+  return (str || "")
+    .replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    .replace(/\D/g, "")
+    .slice(0, 5);
+}
+
+function renderMyCode(id) {
+  document.getElementById("myId").textContent = id;
+  const qrContainer = document.getElementById("qrcode");
+  qrContainer.innerHTML = "";
+  const connectUrl = `${window.location.origin}${window.location.pathname}?connect=${id}`;
+  if (typeof QRCode === "function") {
+    new QRCode(qrContainer, {
+      text: connectUrl,
+      width: 156,
+      height: 156,
+      colorDark: "#000000",
+      colorLight: "#ffffff"
+    });
+  }
+}
+
+function updateReadyIndicator() {
+  const pill = document.getElementById("readyPill");
+  const text = document.getElementById("readyText");
+  if (mqttReady || peerReady) {
+    pill.classList.add("is-ready");
+    text.textContent = "待機中";
+  } else {
+    pill.classList.remove("is-ready");
+    text.textContent = "準備中...";
+  }
+}
+
+function setConnStatus(message, isError = false) {
+  const el = document.getElementById("connStatus");
+  el.textContent = message;
+  el.classList.toggle("is-error", isError);
+}
+
+function setConnectingUI(isConnecting, targetId = "") {
+  const btn = document.getElementById("connectBtn");
+  const label = document.getElementById("connectBtnLabel");
+  const spinner = document.getElementById("connectSpinner");
+  const cancelBtn = document.getElementById("cancelConnectBtn");
+  btn.disabled = isConnecting;
+  spinner.classList.toggle("hidden", !isConnecting);
+  label.textContent = isConnecting ? `${targetId} に接続中...` : "接続する";
+  cancelBtn.classList.toggle("hidden", !isConnecting);
+}
+
+// === Crypto (ECDH P-256 + AES-256-GCM) ===
+function bytesToBase64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+async function initCrypto() {
+  if (!window.crypto || !crypto.subtle) return;
+  myKeyPair = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" },
+    true,
+    ["deriveKey"]
+  );
+  const rawPub = await crypto.subtle.exportKey("raw", myKeyPair.publicKey);
+  myPubKeyB64 = bytesToBase64(new Uint8Array(rawPub));
+}
+
+async function deriveAesKey(remotePubB64) {
+  if (!crypto.subtle || !myKeyPair || !remotePubB64) return null;
+  const remotePub = await crypto.subtle.importKey(
+    "raw",
+    base64ToBytes(remotePubB64),
+    { name: "ECDH", namedCurve: "P-256" },
+    false,
+    []
+  );
+  return crypto.subtle.deriveKey(
+    { name: "ECDH", public: remotePub },
+    myKeyPair.privateKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+async function encryptPacket(frameTypeByte, plainUint8) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, sharedAesKey, plainUint8)
+  );
+  const packet = new Uint8Array(1 + 12 + encrypted.length);
+  packet[0] = frameTypeByte;
+  packet.set(iv, 1);
+  packet.set(encrypted, 13);
+  return packet;
+}
+
+async function decryptPacket(rawPayload) {
+  const bytes = new Uint8Array(rawPayload.buffer, rawPayload.byteOffset, rawPayload.byteLength);
+  const frameType = bytes[0];
+  const iv = bytes.slice(1, 13);
+  const ciphertext = bytes.slice(13);
+  const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, sharedAesKey, ciphertext);
+  return { frameType, plainUint8: new Uint8Array(plainBuf) };
+}
+
+// === MQTT WSS Signaling & Encrypted Fallback Transport ===
+function mqttSubscribe(topic, opts = { qos: 1 }) {
+  return new Promise((resolve, reject) => {
+    if (!mqttClient) return reject(new Error("MQTT unavailable"));
+    mqttClient.subscribe(topic, opts, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+function mqttPublish(topic, payload, opts = { qos: 1 }) {
+  return new Promise((resolve, reject) => {
+    if (!mqttClient) return reject(new Error("MQTT unavailable"));
+    mqttClient.publish(topic, payload, opts, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+function startMqttClient() {
+  if (typeof mqtt === "undefined") return;
+  const brokerUrl = MQTT_BROKERS[mqttBrokerIndex % MQTT_BROKERS.length];
+  let settled = false;
+
+  const client = mqtt.connect(brokerUrl, {
+    clientId: `airshare_${myId}_${Math.random().toString(16).slice(2, 8)}`,
+    clean: true,
+    connectTimeout: 4500,
+    reconnectPeriod: 3000,
+    keepalive: 30
+  });
+  mqttClient = client;
+
+  const failoverTimer = setTimeout(() => {
+    if (!settled) {
+      settled = true;
+      try { client.end(true); } catch {}
+      mqttBrokerIndex += 1;
+      startMqttClient();
+    }
+  }, 5000);
+
+  client.on("connect", async () => {
+    if (mqttClient !== client) return;
+    settled = true;
+    clearTimeout(failoverTimer);
+    mqttReady = true;
+    updateReadyIndicator();
+
+    const inbox = `lanp2p-v2/inbox/${myId}`;
+    currentInboxTopic = inbox;
+    try {
+      await mqttSubscribe(inbox, { qos: 1 });
+      if (relayInTopic) {
+        await mqttSubscribe(relayInTopic, { qos: 1 });
+      }
+      if (connectingTargetId && !isRelayReady) {
+        sendMqttHello(connectingTargetId, currentAttemptId);
+      }
+    } catch {}
+  });
+
+  client.on("message", (topic, payload) => {
+    if (topic === currentInboxTopic) {
+      const bytes = new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength);
+      try {
+        const msg = JSON.parse(new TextDecoder().decode(bytes));
+        handleInboxMessage(msg);
+      } catch {}
+      return;
+    }
+    if (relayInTopic && topic === relayInTopic) {
+      handleEncryptedRelayPacket(payload);
+    }
+  });
+
+  client.on("offline", () => {
+    if (mqttClient === client) {
+      mqttReady = false;
+      updateReadyIndicator();
+    }
+  });
+
+  client.on("error", () => {
+    if (!settled) {
+      settled = true;
+      clearTimeout(failoverTimer);
+      try { client.end(true); } catch {}
+      mqttBrokerIndex += 1;
+      startMqttClient();
+    }
+  });
+}
+
+async function sendMqttHello(targetId, attemptId) {
+  if (!mqttClient || !mqttReady || !myPubKeyB64) return;
+  try {
+    await mqttPublish(
+      `lanp2p-v2/inbox/${targetId}`,
+      JSON.stringify({ kind: "hello", from: myId, pubKey: myPubKeyB64, attemptId }),
+      { qos: 1 }
+    );
+  } catch {}
+}
+
+async function handleInboxMessage(msg) {
+  if (!msg || !msg.kind || !msg.from) return;
+
+  if (msg.kind === "hello") {
+    if (connectedPeerId && connectedPeerId !== msg.from) {
+      await mqttPublish(`lanp2p-v2/inbox/${msg.from}`, JSON.stringify({ kind: "busy", from: myId }), { qos: 1 }).catch(() => {});
+      return;
+    }
+    try {
+      sharedAesKey = await deriveAesKey(msg.pubKey);
+      relayInTopic = `lanp2p-v2/stream/${msg.attemptId}/from-${msg.from}`;
+      relayOutTopic = `lanp2p-v2/stream/${msg.attemptId}/from-${myId}`;
+      await mqttSubscribe(relayInTopic, { qos: 1 });
+      await mqttPublish(
+        `lanp2p-v2/inbox/${msg.from}`,
+        JSON.stringify({ kind: "hello-ack", from: myId, pubKey: myPubKeyB64, attemptId: msg.attemptId }),
+        { qos: 1 }
+      );
+      isRelayReady = true;
+      enterConnectedState(msg.from, "relay");
+    } catch {}
+  } else if (msg.kind === "hello-ack") {
+    if (msg.attemptId !== currentAttemptId || msg.from !== connectingTargetId) return;
+    try {
+      sharedAesKey = await deriveAesKey(msg.pubKey);
+      relayInTopic = `lanp2p-v2/stream/${msg.attemptId}/from-${msg.from}`;
+      relayOutTopic = `lanp2p-v2/stream/${msg.attemptId}/from-${myId}`;
+      await mqttSubscribe(relayInTopic, { qos: 1 });
+      isRelayReady = true;
+      enterConnectedState(msg.from, "relay");
+    } catch {}
+  } else if (msg.kind === "busy") {
+    if (msg.from === connectingTargetId) {
+      cancelPendingConnection("相手は別の端末と接続中です。", true);
+    }
+  } else if (msg.kind === "bye") {
+    if (msg.from === connectedPeerId) {
+      resetToConnectPanel("相手が接続を終了しました。");
+    }
+  }
+}
+
+// === WebRTC PeerJS (Fast Direct LAN P2P) ===
+function initPeerJS() {
+  if (typeof Peer === "undefined") return;
+  peer = new Peer(PEER_PREFIX + myId, {
     debug: 1,
     config: {
       iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' }
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun.cloudflare.com:3478" }
       ]
     }
   });
 
-  peer.on('open', (id) => {
-    myIdEl.textContent = id;
-    generateQRCode(id);
-
-    // URLに ?connect=12345 があれば自動接続（QRコード読み取り時）
-    const urlParams = new URLSearchParams(window.location.search);
-    const autoTargetId = urlParams.get('connect');
-    if (autoTargetId && autoTargetId.length === 5 && autoTargetId !== id) {
-      document.getElementById("targetId").value = autoTargetId;
-      connectToPeer(autoTargetId);
+  peer.on("open", () => {
+    peerReady = true;
+    updateReadyIndicator();
+    if (connectingTargetId && (!dataConn || !dataConn.open)) {
+      firePeerConnect(connectingTargetId);
     }
   });
 
-  // 相手から接続された時
-  peer.on('connection', (conn) => {
-    setupConnection(conn);
+  peer.on("connection", (conn) => {
+    attachWebRtcConn(conn);
   });
 
-  peer.on('error', (err) => {
-    if (err.type === 'unavailable-id') {
-      peer.destroy();
+  peer.on("error", (err) => {
+    if (err.type === "unavailable-id") {
+      try { peer.destroy(); } catch {}
+      peerReady = false;
+      myId = generateCode();
+      renderMyCode(myId);
+      if (mqttClient && mqttReady) {
+        const oldInbox = currentInboxTopic;
+        currentInboxTopic = `lanp2p-v2/inbox/${myId}`;
+        if (oldInbox) mqttClient.unsubscribe(oldInbox);
+        mqttSubscribe(currentInboxTopic, { qos: 1 }).catch(() => {});
+      }
       initPeerJS();
       return;
     }
-    if (err.type === 'peer-unavailable') {
-      connStatus.textContent = "エラー: 指定されたコードの相手が見つかりません。";
-      connectBtn.disabled = false;
+    if (err.type === "peer-unavailable") {
+      if (!mqttReady && !isRelayReady) {
+        cancelPendingConnection("エラー: 指定されたコードの相手が見つかりません。", true);
+      }
       return;
     }
-    connectBtn.disabled = false;
-    alert("通信エラーが発生しました: " + err.type);
-    connStatus.textContent = "エラー: " + err.type;
   });
 }
 
-function connectToPeer(targetId) {
-  if (!peer || !peer.open) {
-    document.getElementById("connStatus").textContent = "接続準備中です。少しお待ちください...";
-    return;
-  }
-  document.getElementById("connectBtn").disabled = true;
-  document.getElementById("connStatus").textContent = `${targetId} に接続中...`;
-  const conn = peer.connect(targetId, { reliable: true });
-  setupConnection(conn);
+function firePeerConnect(targetId) {
+  if (!peer || !peerReady) return;
+  try {
+    const conn = peer.connect(PEER_PREFIX + targetId, { reliable: true });
+    attachWebRtcConn(conn);
+  } catch {}
 }
 
-function setupConnection(conn) {
-  if (dataConn && dataConn.open) {
-    conn.close(); // 既に接続済みの場合は拒否
+function attachWebRtcConn(conn) {
+  const remoteId = conn.peer.replace(PEER_PREFIX, "");
+  if (connectedPeerId && connectedPeerId !== remoteId) {
+    conn.close();
+    return;
+  }
+  if (dataConn && dataConn.open && dataConn !== conn) {
+    conn.close();
     return;
   }
   dataConn = conn;
 
-  dataConn.on('open', () => {
-    document.getElementById("connectPanel").classList.add("hidden");
-    document.getElementById("transferPanel").classList.remove("hidden");
-    document.getElementById("peerBadge").textContent = `🟢 接続先: ${dataConn.peer}`;
-    // URLパラメータを綺麗にする
-    window.history.replaceState({}, document.title, window.location.pathname);
-  });
+  const onOpen = () => {
+    isDirectP2P = true;
+    enterConnectedState(remoteId, "p2p");
+  };
 
-  dataConn.on('data', handleIncomingData);
+  if (conn.open) {
+    onOpen();
+  } else {
+    conn.on("open", onOpen);
+  }
 
-  dataConn.on('close', () => {
-    alert("相手との接続が切断されました。");
-    location.reload();
+  conn.on("data", handleIncomingPayload);
+
+  conn.on("close", () => {
+    if (dataConn === conn) {
+      dataConn = null;
+      isDirectP2P = false;
+      if (isRelayReady && connectedPeerId) {
+        updateConnectionBadge();
+      } else if (connectedPeerId) {
+        resetToConnectPanel("相手との接続が切断されました。");
+      }
+    }
   });
 }
 
-// === 2. ファイル送信処理（チャンク分割＆バックプレッシャー制御） ===
-async function sendFiles(files) {
-  if (!dataConn || !dataConn.open) return alert("接続されていません");
+// === Connection Lifecycle ===
+function clearConnectionTimers() {
+  if (connectTimeoutTimer) {
+    clearTimeout(connectTimeoutTimer);
+    connectTimeoutTimer = null;
+  }
+  retryHelloTimers.forEach((id) => clearTimeout(id));
+  retryHelloTimers = [];
+}
 
+function connectToPeer(rawTargetId) {
+  const targetId = normalizeCode(rawTargetId);
+  if (targetId.length !== 5) {
+    setConnStatus("5桁の数字を入力してください。", true);
+    return;
+  }
+  if (targetId === myId) {
+    setConnStatus("自分のコードには接続できません。", true);
+    return;
+  }
+
+  clearConnectionTimers();
+  connectingTargetId = targetId;
+  currentAttemptId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+
+  setConnectingUI(true, targetId);
+  setConnStatus(`${targetId} に接続しています...`);
+
+  if (mqttReady) {
+    sendMqttHello(targetId, currentAttemptId);
+  }
+  if (peerReady) {
+    firePeerConnect(targetId);
+  }
+
+  retryHelloTimers.push(
+    setTimeout(() => {
+      if (connectingTargetId === targetId && !isRelayReady) sendMqttHello(targetId, currentAttemptId);
+    }, 2500),
+    setTimeout(() => {
+      if (connectingTargetId === targetId && !isRelayReady) sendMqttHello(targetId, currentAttemptId);
+    }, 6000)
+  );
+
+  connectTimeoutTimer = setTimeout(() => {
+    if (connectingTargetId === targetId && !connectedPeerId) {
+      cancelPendingConnection("相手が見つかりませんでした。番号を確認し、相手側の画面が開いている状態で再度お試しください。", true);
+    }
+  }, CONNECT_TIMEOUT_MS);
+}
+
+function cancelPendingConnection(statusText = "キャンセルしました。", isError = false) {
+  clearConnectionTimers();
+  connectingTargetId = null;
+  currentAttemptId = null;
+  if (dataConn && !dataConn.open) {
+    try { dataConn.close(); } catch {}
+    dataConn = null;
+  }
+  setConnectingUI(false);
+  setConnStatus(statusText, isError);
+}
+
+function enterConnectedState(remoteId, mode) {
+  clearConnectionTimers();
+  connectingTargetId = null;
+  connectedPeerId = remoteId;
+  if (mode === "p2p") isDirectP2P = true;
+  if (mode === "relay") isRelayReady = true;
+
+  setConnectingUI(false);
+  document.getElementById("connectPanel").classList.add("hidden");
+  document.getElementById("transferPanel").classList.remove("hidden");
+  updateConnectionBadge();
+
+  if (window.location.search) {
+    window.history.replaceState({}, document.title, window.location.pathname);
+  }
+}
+
+function updateConnectionBadge() {
+  const badge = document.getElementById("peerBadge");
+  if (isDirectP2P) {
+    badge.textContent = `⚡ P2P直結 · ${connectedPeerId}`;
+    badge.classList.add("is-p2p");
+  } else {
+    badge.textContent = `🔒 セキュア接続 · ${connectedPeerId}`;
+    badge.classList.remove("is-p2p");
+  }
+}
+
+function resetToConnectPanel(statusMsg = "待機中") {
+  clearConnectionTimers();
+  connectingTargetId = null;
+  currentAttemptId = null;
+  connectedPeerId = null;
+  isDirectP2P = false;
+  isRelayReady = false;
+  sharedAesKey = null;
+
+  if (relayInTopic && mqttClient) {
+    try { mqttClient.unsubscribe(relayInTopic); } catch {}
+  }
+  relayInTopic = "";
+  relayOutTopic = "";
+
+  if (dataConn) {
+    try { dataConn.close(); } catch {}
+    dataConn = null;
+  }
+
+  if (pendingAckWaiter) {
+    pendingAckWaiter.reject(new Error("Disconnected"));
+    pendingAckWaiter = null;
+  }
+
+  incomingFileInfo = null;
+  incomingChunks = [];
+  receivedSize = 0;
+  expectedRelaySeq = 0;
+
+  document.getElementById("sendProgressBox").style.display = "none";
+  document.getElementById("recvProgressBox").style.display = "none";
+  document.getElementById("transferPanel").classList.add("hidden");
+  document.getElementById("connectPanel").classList.remove("hidden");
+  setConnectingUI(false);
+  setConnStatus(statusMsg, false);
+}
+
+// === File Sending (Hybrid P2P + E2EE WSS Relay) ===
+function sendFiles(files) {
+  if (!connectedPeerId || (!isDirectP2P && !isRelayReady)) {
+    alert("接続されていません");
+    return;
+  }
+  const fileArray = Array.from(files);
+  sendQueue = sendQueue
+    .then(() => processSendQueue(fileArray))
+    .catch((err) => {
+      console.error(err);
+      document.getElementById("sendProgressBox").style.display = "none";
+      if (connectedPeerId) {
+        alert("送信中にエラーが発生しました: " + (err && err.message ? err.message : err));
+      }
+    });
+}
+
+async function processSendQueue(files) {
   const progressBox = document.getElementById("sendProgressBox");
   const progressBar = document.getElementById("sendProgress");
   const fileNameEl = document.getElementById("sendFileName");
@@ -244,138 +1378,351 @@ async function sendFiles(files) {
     progressBar.value = 0;
     percentEl.textContent = "0%";
 
-    // ① メタデータを先に送信
-    dataConn.send({
-      type: 'file-start',
-      name: file.name,
-      size: file.size,
-      mime: file.type || 'application/octet-stream'
-    });
-
-    // ② ファイルを64KBずつスライスして送信
-    let offset = 0;
-    const dc = dataConn.dataChannel;
-
-    while (offset < file.size) {
-      // ★重要: バッファが1MB以上溜まっていたら少し待つ（Safariのクラッシュ防止）
-      if (dc && dc.bufferedAmount > 1 * 1024 * 1024) {
-        await new Promise(r => setTimeout(r, 50));
-        continue;
-      }
-
-      const slice = file.slice(offset, offset + CHUNK_SIZE);
-      const buffer = await slice.arrayBuffer();
-
-      dataConn.send({
-        type: 'file-chunk',
-        data: buffer
-      });
-
-      offset += buffer.byteLength;
-      const percent = Math.min(100, Math.round((offset / file.size) * 100));
-      progressBar.value = percent;
-      percentEl.textContent = `${percent}%`;
+    const useP2P = Boolean(dataConn && dataConn.open);
+    if (useP2P) {
+      await sendFileViaP2P(file, progressBar, percentEl);
+    } else if (isRelayReady) {
+      await sendFileViaRelay(file, progressBar, percentEl);
+    } else {
+      throw new Error("通信経路が切断されています");
     }
 
-    // ③ 完了通知を送信
-    dataConn.send({ type: 'file-end' });
-    addFileToList(file.name, file.size, file.type, file, "送信完了");
+    addFileToList(file.name, file.size, file.type, file, "送信");
   }
 
-  setTimeout(() => { progressBox.style.display = "none"; }, 2000);
+  setTimeout(() => { progressBox.style.display = "none"; }, 1800);
 }
 
-// === 3. ファイル受信処理 ===
-function handleIncomingData(payload) {
+async function sendFileViaP2P(file, progressBar, percentEl) {
+  dataConn.send({
+    type: "file-start",
+    name: file.name,
+    size: file.size,
+    mime: file.type || "application/octet-stream"
+  });
+
+  let offset = 0;
+  const dc = dataConn.dataChannel;
+
+  while (offset < file.size) {
+    if (!dataConn || !dataConn.open) {
+      throw new Error("P2P接続が切断されました");
+    }
+    if (dc && dc.bufferedAmount > 1 * 1024 * 1024) {
+      await new Promise((r) => setTimeout(r, 40));
+      continue;
+    }
+
+    const slice = file.slice(offset, offset + P2P_CHUNK_SIZE);
+    const buffer = await slice.arrayBuffer();
+    dataConn.send({ type: "file-chunk", data: buffer });
+
+    offset += buffer.byteLength;
+    const percent = file.size > 0 ? Math.min(100, Math.round((offset / file.size) * 100)) : 100;
+    progressBar.value = percent;
+    percentEl.textContent = `${percent}%`;
+  }
+
+  dataConn.send({ type: "file-end" });
+  progressBar.value = 100;
+  percentEl.textContent = "100%";
+}
+
+function waitForChunkAck(transferId, seq, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingAckWaiter = null;
+      reject(new Error("受信側からの応答がタイムアウトしました"));
+    }, timeoutMs);
+
+    pendingAckWaiter = {
+      transferId,
+      seq,
+      resolve: () => { clearTimeout(timer); pendingAckWaiter = null; resolve(); },
+      reject: (err) => { clearTimeout(timer); pendingAckWaiter = null; reject(err); }
+    };
+  });
+}
+
+async function sendRelayControl(obj) {
+  const plain = new TextEncoder().encode(JSON.stringify(obj));
+  const packet = await encryptPacket(0x01, plain);
+  await mqttPublish(relayOutTopic, packet, { qos: 1 });
+}
+
+async function sendFileViaRelay(file, progressBar, percentEl) {
+  const transferId = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+  await sendRelayControl({
+    type: "file-start",
+    transferId,
+    name: file.name,
+    size: file.size,
+    mime: file.type || "application/octet-stream"
+  });
+
+  let offset = 0;
+  let seq = 0;
+
+  while (offset < file.size) {
+    if (!isRelayReady || !mqttReady) {
+      throw new Error("リレー接続が切断されました");
+    }
+    const slice = file.slice(offset, offset + RELAY_CHUNK_SIZE);
+    const chunkBytes = new Uint8Array(await slice.arrayBuffer());
+
+    const framed = new Uint8Array(4 + chunkBytes.length);
+    new DataView(framed.buffer).setUint32(0, seq, false);
+    framed.set(chunkBytes, 4);
+
+    const packet = await encryptPacket(0x02, framed);
+    await mqttPublish(relayOutTopic, packet, { qos: 1 });
+
+    offset += chunkBytes.length;
+    const percent = file.size > 0 ? Math.min(100, Math.round((offset / file.size) * 100)) : 100;
+    progressBar.value = percent;
+    percentEl.textContent = `${percent}%`;
+
+    if ((seq + 1) % RELAY_ACK_INTERVAL === 0 || offset >= file.size) {
+      await waitForChunkAck(transferId, seq, 15000);
+    }
+    seq += 1;
+  }
+
+  await sendRelayControl({ type: "file-end", transferId });
+  progressBar.value = 100;
+  percentEl.textContent = "100%";
+}
+
+// === File Receiving ===
+async function handleEncryptedRelayPacket(rawPayload) {
+  if (!sharedAesKey) return;
+  try {
+    const { frameType, plainUint8 } = await decryptPacket(rawPayload);
+    if (frameType === 0x01) {
+      const msg = JSON.parse(new TextDecoder().decode(plainUint8));
+      if (msg.type === "chunk-ack") {
+        if (pendingAckWaiter && pendingAckWaiter.transferId === msg.transferId && msg.seq >= pendingAckWaiter.seq) {
+          pendingAckWaiter.resolve();
+        }
+        return;
+      }
+      handleIncomingPayload(msg, true);
+    } else if (frameType === 0x02) {
+      if (!incomingFileInfo) return;
+      const view = new DataView(plainUint8.buffer, plainUint8.byteOffset, plainUint8.byteLength);
+      const seq = view.getUint32(0, false);
+      if (seq < expectedRelaySeq) return;
+      expectedRelaySeq = seq + 1;
+
+      const chunk = plainUint8.slice(4);
+      handleIncomingPayload({ type: "file-chunk", data: chunk }, true);
+
+      if ((seq + 1) % RELAY_ACK_INTERVAL === 0 || receivedSize >= incomingFileInfo.size) {
+        sendRelayControl({
+          type: "chunk-ack",
+          transferId: incomingFileInfo.transferId,
+          seq
+        }).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.error("Relay decrypt error:", err);
+  }
+}
+
+function handleIncomingPayload(payload) {
   const progressBox = document.getElementById("recvProgressBox");
   const progressBar = document.getElementById("recvProgress");
   const fileNameEl = document.getElementById("recvFileName");
   const percentEl = document.getElementById("recvPercent");
 
-  // ① ファイル受信開始
-  if (payload.type === 'file-start') {
+  if (payload.type === "file-start") {
     incomingFileInfo = payload;
     incomingChunks = [];
     receivedSize = 0;
+    expectedRelaySeq = 0;
 
     progressBox.style.display = "block";
     fileNameEl.textContent = `受信中: ${payload.name}`;
     progressBar.value = 0;
     percentEl.textContent = "0%";
-  }
-  // ② チャンクデータの結合
-  else if (payload.type === 'file-chunk') {
+  } else if (payload.type === "file-chunk") {
     if (!incomingFileInfo) return;
     incomingChunks.push(payload.data);
     const chunkBytes = payload.data.byteLength ?? payload.data.size ?? 0;
     receivedSize += chunkBytes;
 
-    const percent = Math.min(100, Math.round((receivedSize / incomingFileInfo.size) * 100));
+    const percent = incomingFileInfo.size > 0
+      ? Math.min(100, Math.round((receivedSize / incomingFileInfo.size) * 100))
+      : 100;
     progressBar.value = percent;
     percentEl.textContent = `${percent}%`;
-  }
-  // ③ ファイル受信完了・Blob生成
-  else if (payload.type === 'file-end') {
+  } else if (payload.type === "file-end") {
     if (!incomingFileInfo) return;
-    const blob = new Blob(incomingChunks, { type: incomingFileInfo.mime });
+    const blob = new Blob(incomingChunks, { type: incomingFileInfo.mime || "application/octet-stream" });
     addFileToList(incomingFileInfo.name, incomingFileInfo.size, incomingFileInfo.mime, blob, "受信");
 
-    // メモリ解放
     incomingFileInfo = null;
     incomingChunks = [];
-    setTimeout(() => { progressBox.style.display = "none"; }, 2000);
+    receivedSize = 0;
+    expectedRelaySeq = 0;
+    setTimeout(() => { progressBox.style.display = "none"; }, 1800);
   }
 }
 
-// === 4. UI・履歴表示・QRコード生成 ===
+// === History & iOS Share / Save ===
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 function addFileToList(name, size, mime, blob, statusLabel) {
   const list = document.getElementById("fileList");
+  const emptyEl = document.getElementById("fileEmpty");
+  if (emptyEl) emptyEl.remove();
+
   const li = document.createElement("li");
   li.className = "file-item";
 
   const url = URL.createObjectURL(blob);
-  const sizeMB = (size / (1024 * 1024)).toFixed(2);
   const isImage = mime && mime.startsWith("image/");
 
-  li.innerHTML = `
-    <div class="file-header">
-      <div>
-        <div class="file-name">[${statusLabel}] ${escapeHTML(name)}</div>
-        <div class="file-meta">${sizeMB} MB</div>
-      </div>
-      <a href="${url}" download="${escapeHTML(name)}" class="dl-btn">保存 / 開く</a>
-    </div>
-    ${isImage ? `<img src="${url}" class="preview-img" alt="preview">` : ''}
-  `;
+  const header = document.createElement("div");
+  header.className = "file-header";
+
+  const info = document.createElement("div");
+  info.className = "file-info";
+  const nameDiv = document.createElement("div");
+  nameDiv.className = "file-name";
+  nameDiv.textContent = `[${statusLabel}] ${name}`;
+  const metaDiv = document.createElement("div");
+  metaDiv.className = "file-meta";
+  metaDiv.textContent = formatFileSize(size);
+  info.append(nameDiv, metaDiv);
+
+  const actions = document.createElement("div");
+  actions.className = "file-actions";
+
+  let shareFile = null;
+  try {
+    shareFile = new File([blob], name, { type: mime || "application/octet-stream" });
+  } catch {}
+
+  if (shareFile && navigator.canShare && navigator.canShare({ files: [shareFile] })) {
+    const shareBtn = document.createElement("button");
+    shareBtn.type = "button";
+    shareBtn.className = "share-file-btn";
+    shareBtn.textContent = isImage ? "共有 / 写真に保存" : "共有 / 保存";
+    shareBtn.addEventListener("click", async () => {
+      try {
+        await navigator.share({ files: [shareFile], title: name });
+      } catch {}
+    });
+    actions.append(shareBtn);
+  }
+
+  const dlLink = document.createElement("a");
+  dlLink.href = url;
+  dlLink.download = name;
+  dlLink.className = "dl-btn";
+  dlLink.textContent = "保存";
+  actions.append(dlLink);
+
+  header.append(info, actions);
+  li.append(header);
+
+  if (isImage) {
+    const img = document.createElement("img");
+    img.src = url;
+    img.className = "preview-img";
+    img.alt = `${name} のプレビュー`;
+    li.append(img);
+  }
 
   list.prepend(li);
 }
 
-function generateQRCode(myId) {
-  const qrContainer = document.getElementById("qrcode");
-  qrContainer.innerHTML = "";
-  const connectUrl = `${window.location.origin}${window.location.pathname}?connect=${myId}`;
-  new QRCode(qrContainer, {
-    text: connectUrl,
-    width: 150,
-    height: 150,
-    colorDark : "#000000",
-    colorLight : "#ffffff",
-  });
+// === UI Events & Copy Helper ===
+function legacyCopy(text) {
+  const previousFocus = document.activeElement;
+  const field = Object.assign(document.createElement("textarea"), { value: text });
+  field.setAttribute("readonly", "");
+  field.style.cssText = "position:fixed;inset-block-start:0;opacity:0";
+  document.body.append(field);
+  field.select();
+  try {
+    return document.execCommand("copy");
+  } finally {
+    field.remove();
+    previousFocus?.focus({ preventScroll: true });
+  }
+}
+
+function showCopyTip(message) {
+  const tip = document.getElementById("copyTip");
+  clearTimeout(copyTipTimer);
+  let text = message;
+  if (text === lastCopyMessage) text += "\u00A0";
+  lastCopyMessage = message;
+  tip.textContent = "";
+  tip.classList.add("is-visible");
+  requestAnimationFrame(() => { tip.textContent = text; });
+  copyTipTimer = setTimeout(() => {
+    tip.classList.remove("is-visible");
+    tip.textContent = "";
+  }, 2000);
 }
 
 function setupUIEvents() {
   const targetInput = document.getElementById("targetId");
   const connectBtn = document.getElementById("connectBtn");
+  const cancelBtn = document.getElementById("cancelConnectBtn");
+  const disconnectBtn = document.getElementById("disconnectBtn");
+  const copyCodeBtn = document.getElementById("copyCodeBtn");
+  const shareLinkBtn = document.getElementById("shareLinkBtn");
 
-  // 接続ボタン
-  connectBtn.addEventListener("click", () => {
-    const targetId = targetInput.value.trim();
-    if (targetId.length === 5) connectToPeer(targetId);
-    else alert("5桁の数字を入力してください");
+  if (navigator.share) {
+    shareLinkBtn.classList.remove("hidden");
+    shareLinkBtn.addEventListener("click", async () => {
+      const url = `${window.location.origin}${window.location.pathname}?connect=${myId}`;
+      try {
+        await navigator.share({ title: "AirShare 接続リンク", text: `接続コード: ${myId}`, url });
+      } catch {}
+    });
+  }
+
+  copyCodeBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(myId);
+      showCopyTip("コピーしました");
+    } catch {
+      showCopyTip(legacyCopy(myId) ? "コピーしました" : "コピー失敗");
+    }
   });
 
-  // Enterキーで接続
+  targetInput.addEventListener("input", () => {
+    const cleaned = normalizeCode(targetInput.value);
+    if (targetInput.value !== cleaned) {
+      targetInput.value = cleaned;
+    }
+  });
+
+  connectBtn.addEventListener("click", () => {
+    connectToPeer(targetInput.value);
+  });
+
+  cancelBtn.addEventListener("click", () => {
+    cancelPendingConnection("キャンセルしました。", false);
+  });
+
+  disconnectBtn.addEventListener("click", () => {
+    if (connectedPeerId && mqttClient && mqttReady) {
+      mqttPublish(`lanp2p-v2/inbox/${connectedPeerId}`, JSON.stringify({ kind: "bye", from: myId }), { qos: 1 }).catch(() => {});
+    }
+    resetToConnectPanel("切断しました。");
+  });
+
   targetInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -383,7 +1730,6 @@ function setupUIEvents() {
     }
   });
 
-  // ファイル選択＆ドラッグ＆ドロップ
   const dropZone = document.getElementById("dropZone");
   const fileInput = document.getElementById("fileInput");
 
@@ -394,6 +1740,7 @@ function setupUIEvents() {
       fileInput.click();
     }
   });
+
   fileInput.addEventListener("change", (e) => {
     if (e.target.files.length > 0) sendFiles(e.target.files);
     fileInput.value = "";
@@ -409,10 +1756,6 @@ function setupUIEvents() {
     dropZone.classList.remove("dragover");
     if (e.dataTransfer.files.length > 0) sendFiles(e.dataTransfer.files);
   });
-}
-
-function escapeHTML(str) {
-  return str.replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag]));
 }
 </script>
 </body>
