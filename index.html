@@ -5,31 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <title>AirShare — LAN P2P ファイル共有</title>
+  <title>AirShare</title>
   <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
   <script src="https://unpkg.com/mqtt@5.10.3/dist/mqtt.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>
     :root {
-      --bg-light: #f2f2f7;
+      --bg-light: #f5f5f7;
       --bg-dark: #000000;
-      --card-light: rgba(255, 255, 255, 0.88);
-      --card-dark: rgba(28, 28, 30, 0.88);
-      --card-solid-light: #ffffff;
-      --card-solid-dark: #1c1c1e;
-      --header-light: rgba(242, 242, 247, 0.78);
-      --header-dark: rgba(18, 18, 20, 0.78);
-      --fill-light: rgba(120, 120, 128, 0.12);
+      --card-light: #ffffff;
+      --card-dark: #1c1c1e;
+      --header-light: rgba(245, 245, 247, 0.82);
+      --header-dark: rgba(0, 0, 0, 0.82);
+      --fill-light: rgba(120, 120, 128, 0.11);
       --fill-dark: rgba(120, 120, 128, 0.24);
-      --text-light: #000000;
-      --text-dark: #ffffff;
-      --subtext-light: rgba(60, 60, 67, 0.65);
-      --subtext-dark: rgba(235, 235, 245, 0.65);
-      --sep-light: rgba(60, 60, 67, 0.14);
-      --sep-dark: rgba(84, 84, 88, 0.45);
-      --blue-light: #007aff;
-      --blue-dark: #0a84ff;
-      --green-light: #34c759;
+      --text-light: #111111;
+      --text-dark: #f5f5f7;
+      --subtext-light: rgba(60, 60, 67, 0.62);
+      --subtext-dark: rgba(235, 235, 245, 0.6);
+      --sep-light: rgba(60, 60, 67, 0.12);
+      --sep-dark: rgba(84, 84, 88, 0.42);
+      --accent-light: #007aff;
+      --accent-dark: #0a84ff;
+      --green-light: #28a745;
       --green-dark: #30d158;
       --red-light: #ff3b30;
       --red-dark: #ff453a;
@@ -38,17 +36,15 @@
 
       --bg: var(--bg-light);
       --card: var(--card-light);
-      --card-solid: var(--card-solid-light);
       --header-bg: var(--header-light);
       --fill: var(--fill-light);
       --text: var(--text-light);
       --subtext: var(--subtext-light);
       --sep: var(--sep-light);
-      --blue: var(--blue-light);
+      --accent: var(--accent-light);
       --green: var(--green-light);
       --red: var(--red-light);
       --amber: var(--amber-light);
-      --shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
       --target-size: 24px;
 
       color-scheme: light dark;
@@ -58,17 +54,15 @@
       :root {
         --bg: var(--bg-dark);
         --card: var(--card-dark);
-        --card-solid: var(--card-solid-dark);
         --header-bg: var(--header-dark);
         --fill: var(--fill-dark);
         --text: var(--text-dark);
         --subtext: var(--subtext-dark);
         --sep: var(--sep-dark);
-        --blue: var(--blue-dark);
+        --accent: var(--accent-dark);
         --green: var(--green-dark);
         --red: var(--red-dark);
         --amber: var(--amber-dark);
-        --shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
       }
     }
 
@@ -76,13 +70,12 @@
       :root {
         --bg: light-dark(var(--bg-light), var(--bg-dark));
         --card: light-dark(var(--card-light), var(--card-dark));
-        --card-solid: light-dark(var(--card-solid-light), var(--card-solid-dark));
         --header-bg: light-dark(var(--header-light), var(--header-dark));
         --fill: light-dark(var(--fill-light), var(--fill-dark));
         --text: light-dark(var(--text-light), var(--text-dark));
         --subtext: light-dark(var(--subtext-light), var(--subtext-dark));
         --sep: light-dark(var(--sep-light), var(--sep-dark));
-        --blue: light-dark(var(--blue-light), var(--blue-dark));
+        --accent: light-dark(var(--accent-light), var(--accent-dark));
         --green: light-dark(var(--green-light), var(--green-dark));
         --red: light-dark(var(--red-light), var(--red-dark));
         --amber: light-dark(var(--amber-light), var(--amber-dark));
@@ -103,12 +96,10 @@
     body {
       margin: 0;
       min-height: 100dvh;
-      background:
-        radial-gradient(circle at 50% -10%, rgba(0, 122, 255, 0.14), transparent 55%),
-        var(--bg);
+      background: var(--bg);
       color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Segoe UI", sans-serif;
-      line-height: 1.45;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Hiragino Sans", "Segoe UI", sans-serif;
+      line-height: 1.4;
       overflow-wrap: break-word;
     }
 
@@ -117,11 +108,32 @@
       min-inline-size: var(--target-size);
     }
 
+    .svg-icon {
+      display: block;
+      flex: none;
+      pointer-events: none;
+    }
+
+    .is-spinning {
+      animation: spin 0.9s linear infinite;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .is-spinning {
+        animation: none;
+      }
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Header */
     .app-header {
       position: sticky;
       top: 0;
       z-index: 20;
-      padding: max(14px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
+      padding: max(12px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
       background: var(--header-bg);
       backdrop-filter: saturate(180%) blur(20px);
       -webkit-backdrop-filter: saturate(180%) blur(20px);
@@ -129,7 +141,7 @@
     }
 
     .header-inner {
-      max-width: 460px;
+      max-width: 420px;
       margin: 0 auto;
       display: flex;
       align-items: center;
@@ -137,48 +149,7 @@
       gap: 12px;
     }
 
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      min-width: 0;
-    }
-
-    .airdrop-icon {
-      position: relative;
-      width: 38px;
-      height: 38px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, var(--blue), #5ac8fa);
-      display: grid;
-      place-items: center;
-      color: #fff;
-      flex: none;
-      box-shadow: 0 4px 12px rgba(0, 122, 255, 0.3);
-    }
-
-    .airdrop-icon::after {
-      content: "";
-      position: absolute;
-      inset: -4px;
-      border-radius: 50%;
-      border: 1.5px solid var(--blue);
-      opacity: 0;
-      animation: radarPulse 2.6s ease-out infinite;
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      .airdrop-icon::after {
-        animation: none;
-      }
-    }
-
-    @keyframes radarPulse {
-      0% { transform: scale(0.92); opacity: 0.55; }
-      100% { transform: scale(1.38); opacity: 0; }
-    }
-
-    .brand-text h1 {
+    h1 {
       margin: 0;
       font-size: 18px;
       font-weight: 700;
@@ -186,98 +157,77 @@
       text-wrap: balance;
     }
 
-    .brand-sub {
-      margin: 0;
-      font-size: 12px;
-      color: var(--subtext);
-    }
-
-    .ready-pill {
+    .status-pill {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      padding: 5px 10px;
+      padding: 4px 10px;
       border-radius: 999px;
       font-size: 12px;
       font-weight: 600;
       background: var(--fill);
       color: var(--subtext);
       white-space: nowrap;
-      flex: none;
     }
 
-    .ready-pill .dot {
-      width: 7px;
-      height: 7px;
+    .status-pill .dot {
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
       background: var(--amber);
     }
 
-    .ready-pill.is-ready {
-      background: rgba(52, 199, 89, 0.14);
-      color: var(--green);
-    }
-
-    .ready-pill.is-ready .dot {
+    .status-pill.is-ready .dot {
       background: var(--green);
     }
 
+    .status-pill.is-ready {
+      color: var(--text);
+    }
+
     main {
-      max-width: 492px;
+      max-width: 452px;
       margin: 0 auto;
-      padding: 18px max(16px, env(safe-area-inset-right, 0px)) max(36px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+      padding: 16px max(16px, env(safe-area-inset-right, 0px)) max(32px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
     }
 
     .card {
       background: var(--card);
-      backdrop-filter: saturate(180%) blur(20px);
-      -webkit-backdrop-filter: saturate(180%) blur(20px);
       border: 0.5px solid var(--sep);
-      border-radius: 20px;
-      padding: 20px;
-      margin-bottom: 16px;
-      box-shadow: var(--shadow);
-      text-align: left;
+      border-radius: 18px;
+      padding: 18px;
+      margin-bottom: 14px;
     }
 
-    .card-header {
+    .card-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      margin-bottom: 10px;
+      margin-bottom: 14px;
     }
 
     .card h2 {
       margin: 0;
-      font-size: 17px;
-      font-weight: 700;
-      letter-spacing: -0.015em;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--subtext);
       text-wrap: balance;
     }
 
-    .note {
-      margin: 0;
-      font-size: 13px;
-      color: var(--subtext);
-      text-wrap: pretty;
-    }
-
-    /* 自分のコード表示 */
-    .passcode-panel {
-      margin: 14px 0;
-      padding: 16px 14px;
-      border-radius: 16px;
-      background: var(--fill);
-      text-align: center;
+    /* Own Code Card */
+    .code-row {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
     }
 
     .code-box {
-      display: block;
       font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
       font-variant-numeric: tabular-nums;
-      font-size: 38px;
-      font-weight: 800;
+      font-size: 36px;
+      font-weight: 700;
       letter-spacing: 8px;
       padding-left: 8px;
       color: var(--text);
@@ -286,10 +236,9 @@
 
     .code-actions {
       display: flex;
-      justify-content: center;
       align-items: center;
-      gap: 10px;
-      margin-top: 12px;
+      justify-content: center;
+      gap: 8px;
       flex-wrap: wrap;
     }
 
@@ -306,19 +255,30 @@
       gap: 6px;
       padding: 8px 14px;
       border-radius: 999px;
-      border: none;
-      background: var(--card-solid);
-      color: var(--blue);
+      border: 0.5px solid var(--sep);
+      background: var(--fill);
+      color: var(--accent);
       font-size: 13px;
       font-weight: 600;
       cursor: pointer;
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
-      transition: transform 0.14s ease, opacity 0.14s ease;
+      transition: transform 0.12s ease, opacity 0.12s ease;
     }
 
     .pill-btn:active {
       transform: scale(0.96);
-      opacity: 0.78;
+      opacity: 0.75;
+    }
+
+    #copyCodeBtn .icon-check {
+      display: none;
+    }
+
+    #copyCodeBtn[data-copied] .icon-copy {
+      display: none;
+    }
+
+    #copyCodeBtn[data-copied] .icon-check {
+      display: block;
     }
 
     .copy-tip {
@@ -328,15 +288,14 @@
       transform: translateX(-50%) translateY(4px);
       background: var(--text);
       color: var(--bg);
-      padding: 5px 10px;
+      padding: 4px 10px;
       border-radius: 999px;
       font-size: 12px;
       font-weight: 600;
       white-space: nowrap;
       pointer-events: none;
       opacity: 0;
-      transition: opacity 0.18s ease, transform 0.18s ease;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+      transition: opacity 0.16s ease, transform 0.16s ease;
     }
 
     .copy-tip.is-visible {
@@ -348,182 +307,217 @@
       display: flex;
       justify-content: center;
       align-items: center;
-      margin: 14px auto 4px auto;
       background: #ffffff;
-      padding: 12px;
-      border-radius: 16px;
+      padding: 10px;
+      border-radius: 14px;
+      border: 0.5px solid var(--sep);
       width: fit-content;
-      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+      margin: 2px auto 0 auto;
     }
 
-    /* 相手コード入力 */
-    .connect-form {
+    /* Connect Input */
+    .connect-row {
       display: flex;
-      flex-direction: column;
-      gap: 12px;
-      margin-top: 12px;
+      gap: 8px;
+      align-items: stretch;
     }
 
     .code-input {
-      width: 100%;
-      padding: 14px 16px;
-      border-radius: 14px;
+      flex: 1;
+      min-width: 0;
+      padding: 12px 14px;
+      border-radius: 12px;
       border: 1.5px solid transparent;
       background: var(--fill);
       color: var(--text);
       font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
       font-variant-numeric: tabular-nums;
-      font-size: 26px;
+      font-size: 22px;
       font-weight: 700;
-      letter-spacing: 6px;
+      letter-spacing: 5px;
       text-align: center;
       outline: none;
-      transition: border-color 0.18s ease, background-color 0.18s ease;
+      transition: border-color 0.16s ease;
     }
 
     .code-input:focus {
-      border-color: var(--blue);
-      background: var(--card-solid);
+      border-color: var(--accent);
     }
 
     .code-input::placeholder {
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", sans-serif;
-      font-size: 15px;
+      font-size: 14px;
       font-weight: 500;
       letter-spacing: 0;
       color: var(--subtext);
     }
 
-    .btn-row {
-      display: flex;
-      gap: 10px;
-    }
-
-    .btn-primary, .btn-secondary, .btn-danger {
+    .btn-primary, .btn-icon {
       border: none;
-      border-radius: 14px;
-      padding: 13px 18px;
-      font-size: 16px;
+      border-radius: 12px;
+      font-size: 15px;
       font-weight: 600;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
-      transition: transform 0.14s ease, opacity 0.14s ease;
+      gap: 6px;
+      transition: transform 0.12s ease, opacity 0.12s ease;
     }
 
     .btn-primary {
-      flex: 1;
-      background: var(--blue);
+      padding: 0 18px;
+      background: var(--accent);
       color: #ffffff;
+      white-space: nowrap;
     }
 
-    .btn-secondary {
+    .btn-icon {
+      padding: 0 12px;
       background: var(--fill);
       color: var(--text);
     }
 
-    .btn-danger {
-      padding: 7px 12px;
-      font-size: 13px;
-      border-radius: 999px;
-      background: rgba(255, 59, 48, 0.14);
+    .btn-icon-danger {
+      background: rgba(255, 59, 48, 0.12);
       color: var(--red);
     }
 
-    .btn-primary:active, .btn-secondary:active, .btn-danger:active {
-      transform: scale(0.98);
-      opacity: 0.8;
+    .btn-primary:active, .btn-icon:active {
+      transform: scale(0.97);
+      opacity: 0.78;
     }
 
     .btn-primary:disabled {
-      opacity: 0.65;
+      opacity: 0.6;
       cursor: default;
     }
 
-    .spinner {
-      width: 16px;
-      height: 16px;
-      border: 2px solid rgba(255, 255, 255, 0.35);
-      border-top-color: #ffffff;
-      border-radius: 50%;
-      animation: spin 0.75s linear infinite;
-    }
-
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-
     .status-line {
-      margin-top: 10px;
+      margin: 10px 0 0 0;
       font-size: 13px;
       color: var(--subtext);
-      min-height: 18px;
       text-wrap: pretty;
     }
 
     .status-line.is-error {
       color: var(--red);
-      font-weight: 500;
     }
 
-    /* 転送画面 */
-    .peer-badge {
+    /* Transfer View */
+    .session-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .peer-id-label {
+      font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: 2px;
+    }
+
+    .mode-chip {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
-      padding: 5px 11px;
+      gap: 5px;
+      padding: 4px 10px;
       border-radius: 999px;
       font-size: 12px;
-      font-weight: 700;
-      background: rgba(52, 199, 89, 0.15);
+      font-weight: 600;
+      background: var(--fill);
+      color: var(--subtext);
+    }
+
+    .mode-chip.is-p2p {
+      background: rgba(0, 122, 255, 0.13);
+      color: var(--accent);
+    }
+
+    .mode-chip.is-relay {
+      background: rgba(40, 167, 69, 0.13);
       color: var(--green);
     }
 
-    .peer-badge.is-p2p {
-      background: rgba(0, 122, 255, 0.15);
-      color: var(--blue);
+    .mode-chip.is-reconnecting {
+      background: rgba(255, 149, 0, 0.15);
+      color: var(--amber);
+    }
+
+    .mode-chip.is-disconnected {
+      background: rgba(255, 59, 48, 0.14);
+      color: var(--red);
+    }
+
+    .session-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
     }
 
     #dropZone {
-      margin-top: 14px;
       border: 1.5px dashed var(--sep);
-      border-radius: 16px;
+      border-radius: 14px;
       padding: 28px 16px;
       text-align: center;
       cursor: pointer;
       background: var(--fill);
-      transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.14s ease;
+      color: var(--accent);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: border-color 0.16s ease, opacity 0.16s ease, transform 0.12s ease;
     }
 
     #dropZone:hover, #dropZone:focus-visible {
-      border-color: var(--blue);
+      border-color: var(--accent);
       outline: none;
     }
 
     #dropZone.dragover {
-      border-color: var(--blue);
-      background: rgba(0, 122, 255, 0.12);
+      border-color: var(--accent);
       transform: scale(0.99);
+    }
+
+    #dropZone.is-disabled {
+      opacity: 0.45;
+      pointer-events: none;
+    }
+
+    .drop-title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .drop-sub {
+      display: none;
+      margin: 0;
+      font-size: 12px;
+      color: var(--subtext);
+    }
+
+    @media (hover: hover) {
+      .drop-sub {
+        display: block;
+      }
     }
 
     #fileInput {
       display: none;
     }
 
-    .drop-title {
-      margin: 0;
-      font-size: 16px;
-      font-weight: 700;
-      color: var(--blue);
-    }
-
     .progress-container {
       display: none;
-      margin-top: 16px;
-      padding: 12px 14px;
-      border-radius: 14px;
+      margin-top: 14px;
+      padding: 12px;
+      border-radius: 12px;
       background: var(--fill);
     }
 
@@ -547,9 +541,9 @@
       border: 0 solid;
       overflow: clip;
       width: 100%;
-      height: 8px;
+      height: 6px;
       border-radius: 999px;
-      background-color: rgba(120, 120, 128, 0.22);
+      background-color: var(--sep);
     }
 
     progress::-webkit-progress-bar {
@@ -557,52 +551,49 @@
     }
 
     progress::-webkit-progress-value {
-      background-color: var(--blue);
+      background-color: var(--accent);
       border-radius: 999px;
-      transition: inline-size 0.2s ease;
+      transition: inline-size 0.15s ease;
     }
 
     progress::-moz-progress-bar {
-      background-color: var(--blue);
+      background-color: var(--accent);
       border-radius: 999px;
-      transition: inline-size 0.2s ease;
+      transition: inline-size 0.15s ease;
     }
 
-    /* ファイル履歴 */
+    /* History */
     .file-list {
       list-style: none;
       padding: 0;
-      margin: 12px 0 0 0;
-    }
-
-    .file-empty {
-      padding: 20px 12px;
-      text-align: center;
-      font-size: 13px;
-      color: var(--subtext);
+      margin: 0;
     }
 
     .file-item {
       background: var(--fill);
-      padding: 14px;
-      border-radius: 16px;
+      padding: 12px;
+      border-radius: 14px;
       margin-bottom: 10px;
       display: flex;
       flex-direction: column;
       gap: 10px;
     }
 
+    .file-item:last-child {
+      margin-bottom: 0;
+    }
+
     .file-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       flex-wrap: wrap;
     }
 
     .file-info {
       min-width: 0;
-      flex: 1 1 180px;
+      flex: 1 1 160px;
     }
 
     .file-name {
@@ -620,14 +611,13 @@
     .file-actions {
       display: flex;
       align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
+      gap: 6px;
     }
 
     .dl-btn, .share-file-btn {
       border: none;
       border-radius: 999px;
-      padding: 8px 14px;
+      padding: 8px 12px;
       font-size: 13px;
       font-weight: 600;
       text-decoration: none;
@@ -639,22 +629,22 @@
     }
 
     .dl-btn {
-      background: var(--green);
+      background: var(--accent);
       color: #ffffff;
     }
 
     .share-file-btn {
-      background: var(--blue);
-      color: #ffffff;
+      background: var(--card);
+      color: var(--accent);
+      border: 0.5px solid var(--sep);
     }
 
     .preview-img {
       max-inline-size: 100%;
       block-size: auto;
-      max-height: 240px;
-      border-radius: 12px;
+      max-height: 220px;
+      border-radius: 10px;
       object-fit: contain;
-      background: rgba(0, 0, 0, 0.2);
     }
 
     .hidden {
@@ -664,137 +654,176 @@
 </head>
 <body>
 
+  <svg hidden aria-hidden="true">
+    <symbol id="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2"/>
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+    </symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="20 6 9 17 4 12"/>
+    </symbol>
+    <symbol id="icon-share" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/>
+      <polyline points="16 6 12 2 8 6"/>
+      <line x1="12" y1="2" x2="12" y2="15"/>
+    </symbol>
+    <symbol id="icon-arrow-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="5" y1="12" x2="19" y2="12"/>
+      <polyline points="12 5 19 12 12 19"/>
+    </symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18"/>
+      <line x1="6" y1="6" x2="18" y2="18"/>
+    </symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="23 4 23 10 17 10"/>
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+    </symbol>
+    <symbol id="icon-upload" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="17 8 12 3 7 8"/>
+      <line x1="12" y1="3" x2="12" y2="15"/>
+    </symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/>
+      <line x1="12" y1="15" x2="12" y2="3"/>
+    </symbol>
+    <symbol id="icon-bolt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+    </symbol>
+    <symbol id="icon-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+    </symbol>
+  </svg>
+
   <header class="app-header">
     <div class="header-inner">
-      <div class="brand">
-        <div class="airdrop-icon" aria-hidden="true">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 20h.01" />
-            <path d="M8.5 16.5a5 5 0 0 1 7 0" />
-            <path d="M5 13a10 10 0 0 1 14 0" />
-            <path d="M2 9.5a15 15 0 0 1 20 0" />
-          </svg>
-        </div>
-        <div class="brand-text">
-          <h1>AirShare</h1>
-          <p class="brand-sub">Win ⇔ iPhone ファイル共有</p>
-        </div>
-      </div>
-      <span id="readyPill" class="ready-pill" role="status">
+      <h1>AirShare</h1>
+      <span id="readyPill" class="status-pill" role="status">
         <span class="dot" aria-hidden="true"></span>
-        <span id="readyText">準備中...</span>
+        <span id="readyText">準備中</span>
       </span>
     </div>
   </header>
 
   <main>
-    <!-- ① マッチング（接続）画面 -->
     <div id="connectPanel">
       <section class="card" aria-labelledby="myCodeHeading">
-        <div class="card-header">
+        <div class="card-head">
           <h2 id="myCodeHeading">自分のコード</h2>
         </div>
-        <p class="note">相手側でこの5桁のコードを入力するか、iPhone のカメラで QR コードを読み取ってください。</p>
-
-        <div class="passcode-panel">
+        <div class="code-row">
           <span id="myId" class="code-box">-----</span>
           <div class="code-actions">
             <span class="copy-wrap">
-              <button type="button" id="copyCodeBtn" class="pill-btn" aria-label="自分の接続コードをコピー">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                コードをコピー
+              <button type="button" id="copyCodeBtn" class="pill-btn" aria-label="接続コードをコピー">
+                <svg class="svg-icon icon-copy" width="15" height="15" aria-hidden="true"><use href="#icon-copy"></use></svg>
+                <svg class="svg-icon icon-check" width="15" height="15" aria-hidden="true"><use href="#icon-check"></use></svg>
+                コピー
               </button>
               <span id="copyTip" class="copy-tip" role="status"></span>
             </span>
-            <button type="button" id="shareLinkBtn" class="pill-btn hidden">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
-              リンクを共有
+            <button type="button" id="shareLinkBtn" class="pill-btn hidden" aria-label="接続リンクを共有">
+              <svg class="svg-icon" width="15" height="15" aria-hidden="true"><use href="#icon-share"></use></svg>
+              共有
             </button>
           </div>
+          <div id="qrcode" aria-label="接続用QRコード"></div>
         </div>
-
-        <div id="qrcode" aria-label="接続用 QR コード"></div>
       </section>
 
       <section class="card" aria-labelledby="targetHeading">
-        <div class="card-header">
+        <div class="card-head">
           <h2 id="targetHeading">相手に接続</h2>
         </div>
-        <p class="note">相手の画面に表示されている5桁の数字を入力してください。</p>
-
-        <div class="connect-form">
-          <input type="tel" id="targetId" class="code-input" placeholder="5桁のコードを入力" maxlength="5" pattern="[0-9]*" inputmode="numeric" autocomplete="one-time-code" aria-label="相手の5桁の接続コード">
-          <div class="btn-row">
-            <button type="button" id="connectBtn" class="btn-primary">
-              <span id="connectSpinner" class="spinner hidden" aria-hidden="true"></span>
-              <span id="connectBtnLabel">接続する</span>
-            </button>
-            <button type="button" id="cancelConnectBtn" class="btn-secondary hidden">キャンセル</button>
-          </div>
+        <div class="connect-row">
+          <input type="tel" id="targetId" class="code-input" placeholder="00000" maxlength="5" pattern="[0-9]*" inputmode="numeric" autocomplete="one-time-code" aria-label="相手の5桁のコード">
+          <button type="button" id="connectBtn" class="btn-primary">
+            <svg id="connectBtnIcon" class="svg-icon" width="17" height="17" aria-hidden="true"><use href="#icon-arrow-right"></use></svg>
+            <span id="connectBtnLabel">接続</span>
+          </button>
+          <button type="button" id="cancelConnectBtn" class="btn-icon hidden" aria-label="接続をキャンセル">
+            <svg class="svg-icon" width="17" height="17" aria-hidden="true"><use href="#icon-close"></use></svg>
+          </button>
         </div>
-        <p id="connStatus" class="status-line" role="status">待機中</p>
+        <p id="connStatus" class="status-line hidden" role="status"></p>
       </section>
     </div>
 
-    <!-- ② ファイル転送画面（接続後に表示） -->
     <div id="transferPanel" class="hidden">
       <section class="card" aria-labelledby="sendHeading">
-        <div class="card-header">
-          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-            <h2 id="sendHeading">ファイル送信</h2>
-            <span id="peerBadge" class="peer-badge">🔒 セキュア接続</span>
+        <div class="card-head">
+          <div class="session-meta">
+            <h2 id="sendHeading" class="sr-only" hidden>転送</h2>
+            <span id="peerIdLabel" class="peer-id-label">-----</span>
+            <span id="modeChip" class="mode-chip" role="status">
+              <svg id="modeChipIcon" class="svg-icon" width="13" height="13" aria-hidden="true"><use href="#icon-shield"></use></svg>
+              <span id="modeChipText">接続中</span>
+            </span>
           </div>
-          <button type="button" id="disconnectBtn" class="btn-danger">切断</button>
+          <div class="session-actions">
+            <button type="button" id="reconnectBtn" class="btn-icon hidden" aria-label="再接続">
+              <svg class="svg-icon" width="16" height="16" aria-hidden="true"><use href="#icon-refresh"></use></svg>
+            </button>
+            <button type="button" id="disconnectBtn" class="btn-icon btn-icon-danger" aria-label="接続を終了">
+              <svg class="svg-icon" width="16" height="16" aria-hidden="true"><use href="#icon-close"></use></svg>
+            </button>
+          </div>
         </div>
 
         <div id="dropZone" role="button" tabindex="0">
-          <p class="drop-title">📁 写真・ファイルを選択</p>
-          <p class="note" style="margin-top: 4px;">タップして選択、またはドラッグ＆ドロップ</p>
+          <svg class="svg-icon" width="26" height="26" aria-hidden="true"><use href="#icon-upload"></use></svg>
+          <p class="drop-title">ファイルを選択</p>
+          <p class="drop-sub">またはドラッグ＆ドロップ</p>
           <input type="file" id="fileInput" multiple>
         </div>
 
-        <!-- 送信プログレス -->
         <div id="sendProgressBox" class="progress-container">
           <div class="status-text">
-            <span id="sendFileName">送信中...</span>
+            <span id="sendFileName">送信中</span>
             <span id="sendPercent">0%</span>
           </div>
           <progress id="sendProgress" value="0" max="100" aria-labelledby="sendFileName"></progress>
         </div>
 
-        <!-- 受信プログレス -->
         <div id="recvProgressBox" class="progress-container">
           <div class="status-text">
-            <span id="recvFileName">受信中...</span>
+            <span id="recvFileName">受信中</span>
             <span id="recvPercent">0%</span>
           </div>
           <progress id="recvProgress" value="0" max="100" aria-labelledby="recvFileName"></progress>
         </div>
       </section>
 
-      <section class="card" aria-labelledby="historyHeading">
-        <div class="card-header">
-          <h2 id="historyHeading">送受信履歴</h2>
+      <section id="historyCard" class="card hidden" aria-labelledby="historyHeading">
+        <div class="card-head">
+          <h2 id="historyHeading">履歴</h2>
         </div>
-        <p class="note">iPhone では「共有 / 写真に保存」または画像長押しでカメラロールに保存できます。</p>
-        <ul id="fileList" class="file-list">
-          <li id="fileEmpty" class="file-empty">まだ送受信されたファイルはありません</li>
-        </ul>
+        <ul id="fileList" class="file-list"></ul>
       </section>
     </div>
   </main>
 
 <script>
 const PEER_PREFIX = "lanp2p-share-";
+const STORAGE_MY_ID = "airshare_my_id";
+const STORAGE_PAIRED_PEER = "airshare_paired_peer";
 const MQTT_BROKERS = [
   "wss://broker.emqx.io:8084/mqtt",
   "wss://broker.hivemq.com:8884/mqtt",
   "wss://test.mosquitto.org:8081"
 ];
-const P2P_CHUNK_SIZE = 64 * 1024;
-const RELAY_CHUNK_SIZE = 32 * 1024;
-const RELAY_ACK_INTERVAL = 8;
+
+const P2P_CHUNK_SIZE = 16 * 1024;
+const P2P_ACK_INTERVAL = 16;
+const RELAY_CHUNK_SIZE = 24 * 1024;
+const RELAY_WINDOW = 6;
+const RELAY_PACE_MS = 8;
+
 const CONNECT_TIMEOUT_MS = 12000;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_DELAYS = [600, 2000, 4500, 8000, 12000];
 
 let myId = "";
 let peer = null;
@@ -805,38 +834,47 @@ let mqttReady = false;
 let peerReady = false;
 let currentInboxTopic = "";
 
+let connState = "idle"; // "idle" | "connecting" | "connected" | "reconnecting" | "disconnected"
 let connectingTargetId = null;
+let pairedPeerId = null;
 let currentAttemptId = null;
+
 let connectTimeoutTimer = null;
 let retryHelloTimers = [];
+let reconnectTimer = null;
+let reconnectAttempt = 0;
+let silentP2PRetryTimer = null;
+let connectedWaiters = [];
 
-let connectedPeerId = null;
 let isDirectP2P = false;
 let isRelayReady = false;
 let relayInTopic = "";
 let relayOutTopic = "";
 
-// Web Crypto (ECDH P-256 + AES-256-GCM)
 let myKeyPair = null;
 let myPubKeyB64 = "";
 let sharedAesKey = null;
 
-// 受信状態
 let incomingFileInfo = null;
 let incomingChunks = [];
 let receivedSize = 0;
-let expectedRelaySeq = 0;
+let expectedSeq = 0;
+let incomingAckInterval = RELAY_WINDOW;
+let p2pRecvChain = Promise.resolve();
 
-// 送信キュー・ACK待機
 let sendQueue = Promise.resolve();
 let pendingAckWaiter = null;
 
-// Copy tooltip state
 let copyTipTimer = null;
 let lastCopyMessage = "";
 
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
 window.addEventListener("DOMContentLoaded", async () => {
-  myId = generateCode();
+  const savedId = normalizeCode(sessionStorage.getItem(STORAGE_MY_ID));
+  myId = savedId.length === 5 ? savedId : generateCode();
+  sessionStorage.setItem(STORAGE_MY_ID, myId);
   renderMyCode(myId);
   setupUIEvents();
 
@@ -847,18 +885,40 @@ window.addEventListener("DOMContentLoaded", async () => {
   const urlParams = new URLSearchParams(window.location.search);
   const autoTargetId = normalizeCode(urlParams.get("connect"));
   if (autoTargetId.length === 5 && autoTargetId !== myId) {
+    sessionStorage.removeItem(STORAGE_PAIRED_PEER);
     document.getElementById("targetId").value = autoTargetId;
     connectToPeer(autoTargetId);
+    return;
+  }
+
+  const savedPeer = normalizeCode(sessionStorage.getItem(STORAGE_PAIRED_PEER));
+  if (savedPeer.length === 5 && savedPeer !== myId) {
+    pairedPeerId = savedPeer;
+    document.getElementById("connectPanel").classList.add("hidden");
+    document.getElementById("transferPanel").classList.remove("hidden");
+    document.getElementById("peerIdLabel").textContent = savedPeer;
+    startAutoReconnect(true);
   }
 });
 
-window.addEventListener("pagehide", () => {
-  if (connectedPeerId && mqttClient && mqttReady) {
-    try {
-      mqttClient.publish(`lanp2p-v2/inbox/${connectedPeerId}`, JSON.stringify({ kind: "bye", from: myId }));
-    } catch {}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  wakeTransports();
+  if (pairedPeerId && !hasLiveTransport()) {
+    startAutoReconnect(true);
   }
 });
+
+window.addEventListener("online", () => {
+  wakeTransports();
+  if (pairedPeerId && !hasLiveTransport()) {
+    startAutoReconnect(true);
+  }
+});
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function generateCode() {
   return Math.floor(10000 + Math.random() * 90000).toString();
@@ -871,6 +931,24 @@ function normalizeCode(str) {
     .slice(0, 5);
 }
 
+function hasLiveTransport() {
+  return Boolean((dataConn && dataConn.open) || (isRelayReady && mqttReady));
+}
+
+function wakeTransports() {
+  if (!peer || peer.destroyed) {
+    initPeerJS();
+  } else if (peer.disconnected) {
+    try { peer.reconnect(); } catch {}
+  }
+
+  if (!mqttClient) {
+    startMqttClient();
+  } else if (!mqttClient.connected && !mqttReady) {
+    try { mqttClient.reconnect(); } catch {}
+  }
+}
+
 function renderMyCode(id) {
   document.getElementById("myId").textContent = id;
   const qrContainer = document.getElementById("qrcode");
@@ -879,8 +957,8 @@ function renderMyCode(id) {
   if (typeof QRCode === "function") {
     new QRCode(qrContainer, {
       text: connectUrl,
-      width: 156,
-      height: 156,
+      width: 140,
+      height: 140,
       colorDark: "#000000",
       colorLight: "#ffffff"
     });
@@ -890,33 +968,52 @@ function renderMyCode(id) {
 function updateReadyIndicator() {
   const pill = document.getElementById("readyPill");
   const text = document.getElementById("readyText");
+  if (connState === "connected") {
+    pill.classList.add("is-ready");
+    text.textContent = isDirectP2P ? "P2P" : "接続中";
+    return;
+  }
+  if (connState === "reconnecting") {
+    pill.classList.remove("is-ready");
+    text.textContent = "再接続中";
+    return;
+  }
   if (mqttReady || peerReady) {
     pill.classList.add("is-ready");
     text.textContent = "待機中";
   } else {
     pill.classList.remove("is-ready");
-    text.textContent = "準備中...";
+    text.textContent = "準備中";
   }
 }
 
-function setConnStatus(message, isError = false) {
+function setConnStatus(message = "", isError = false) {
   const el = document.getElementById("connStatus");
+  if (!message) {
+    el.textContent = "";
+    el.classList.add("hidden");
+    el.classList.remove("is-error");
+    return;
+  }
   el.textContent = message;
+  el.classList.remove("hidden");
   el.classList.toggle("is-error", isError);
 }
 
-function setConnectingUI(isConnecting, targetId = "") {
+function setConnectingUI(isConnecting) {
   const btn = document.getElementById("connectBtn");
   const label = document.getElementById("connectBtnLabel");
-  const spinner = document.getElementById("connectSpinner");
+  const iconUse = document.querySelector("#connectBtnIcon use");
+  const iconSvg = document.getElementById("connectBtnIcon");
   const cancelBtn = document.getElementById("cancelConnectBtn");
   btn.disabled = isConnecting;
-  spinner.classList.toggle("hidden", !isConnecting);
-  label.textContent = isConnecting ? `${targetId} に接続中...` : "接続する";
+  label.textContent = isConnecting ? "接続中" : "接続";
+  iconUse.setAttribute("href", isConnecting ? "#icon-refresh" : "#icon-arrow-right");
+  iconSvg.classList.toggle("is-spinning", isConnecting);
   cancelBtn.classList.toggle("hidden", !isConnecting);
 }
 
-// === Crypto (ECDH P-256 + AES-256-GCM) ===
+// === Web Crypto (ECDH P-256 + AES-256-GCM) ===
 function bytesToBase64(bytes) {
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
@@ -959,25 +1056,23 @@ async function deriveAesKey(remotePubB64) {
   );
 }
 
-async function encryptPacket(frameTypeByte, plainUint8) {
+async function encryptPacket(plainUint8) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = new Uint8Array(
     await crypto.subtle.encrypt({ name: "AES-GCM", iv }, sharedAesKey, plainUint8)
   );
-  const packet = new Uint8Array(1 + 12 + encrypted.length);
-  packet[0] = frameTypeByte;
-  packet.set(iv, 1);
-  packet.set(encrypted, 13);
+  const packet = new Uint8Array(12 + encrypted.length);
+  packet.set(iv, 0);
+  packet.set(encrypted, 12);
   return packet;
 }
 
 async function decryptPacket(rawPayload) {
   const bytes = new Uint8Array(rawPayload.buffer, rawPayload.byteOffset, rawPayload.byteLength);
-  const frameType = bytes[0];
-  const iv = bytes.slice(1, 13);
-  const ciphertext = bytes.slice(13);
+  const iv = bytes.slice(0, 12);
+  const ciphertext = bytes.slice(12);
   const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, sharedAesKey, ciphertext);
-  return { frameType, plainUint8: new Uint8Array(plainBuf) };
+  return new Uint8Array(plainBuf);
 }
 
 // === MQTT WSS Signaling & Encrypted Fallback Transport ===
@@ -1004,8 +1099,8 @@ function startMqttClient() {
     clientId: `airshare_${myId}_${Math.random().toString(16).slice(2, 8)}`,
     clean: true,
     connectTimeout: 4500,
-    reconnectPeriod: 3000,
-    keepalive: 30
+    reconnectPeriod: 2000,
+    keepalive: 25
   });
   mqttClient = client;
 
@@ -1033,7 +1128,9 @@ function startMqttClient() {
         await mqttSubscribe(relayInTopic, { qos: 1 });
       }
       if (connectingTargetId && !isRelayReady) {
-        sendMqttHello(connectingTargetId, currentAttemptId);
+        sendMqttOffer("hello", connectingTargetId, currentAttemptId);
+      } else if (pairedPeerId && !isRelayReady && currentAttemptId) {
+        sendMqttOffer("reconnect", pairedPeerId, currentAttemptId);
       }
     } catch {}
   });
@@ -1042,7 +1139,7 @@ function startMqttClient() {
     if (topic === currentInboxTopic) {
       const bytes = new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength);
       try {
-        const msg = JSON.parse(new TextDecoder().decode(bytes));
+        const msg = JSON.parse(textDecoder.decode(bytes));
         handleInboxMessage(msg);
       } catch {}
       return;
@@ -1052,12 +1149,22 @@ function startMqttClient() {
     }
   });
 
-  client.on("offline", () => {
-    if (mqttClient === client) {
-      mqttReady = false;
-      updateReadyIndicator();
+  const onDrop = () => {
+    if (mqttClient !== client) return;
+    mqttReady = false;
+    isRelayReady = false;
+    updateReadyIndicator();
+    if (pairedPeerId) {
+      if (dataConn && dataConn.open) {
+        updateTransferStatus();
+      } else if (connState === "connected") {
+        startAutoReconnect(false);
+      }
     }
-  });
+  };
+
+  client.on("offline", onDrop);
+  client.on("close", onDrop);
 
   client.on("error", () => {
     if (!settled) {
@@ -1070,12 +1177,12 @@ function startMqttClient() {
   });
 }
 
-async function sendMqttHello(targetId, attemptId) {
-  if (!mqttClient || !mqttReady || !myPubKeyB64) return;
+async function sendMqttOffer(kind, targetId, attemptId) {
+  if (!mqttClient || !mqttReady || !myPubKeyB64 || !targetId || !attemptId) return;
   try {
     await mqttPublish(
       `lanp2p-v2/inbox/${targetId}`,
-      JSON.stringify({ kind: "hello", from: myId, pubKey: myPubKeyB64, attemptId }),
+      JSON.stringify({ kind, from: myId, pubKey: myPubKeyB64, attemptId }),
       { qos: 1 }
     );
   } catch {}
@@ -1084,15 +1191,27 @@ async function sendMqttHello(targetId, attemptId) {
 async function handleInboxMessage(msg) {
   if (!msg || !msg.kind || !msg.from) return;
 
-  if (msg.kind === "hello") {
-    if (connectedPeerId && connectedPeerId !== msg.from) {
+  if (msg.kind === "hello" || msg.kind === "reconnect") {
+    const activeTarget = connectingTargetId || pairedPeerId;
+    if (pairedPeerId && pairedPeerId !== msg.from) {
       await mqttPublish(`lanp2p-v2/inbox/${msg.from}`, JSON.stringify({ kind: "busy", from: myId }), { qos: 1 }).catch(() => {});
       return;
     }
+    if ((connState === "connecting" || connState === "reconnecting") && activeTarget === msg.from && currentAttemptId) {
+      if (myId > msg.from) {
+        return; // impolite peer keeps own attemptId
+      }
+    }
     try {
       sharedAesKey = await deriveAesKey(msg.pubKey);
-      relayInTopic = `lanp2p-v2/stream/${msg.attemptId}/from-${msg.from}`;
-      relayOutTopic = `lanp2p-v2/stream/${msg.attemptId}/from-${myId}`;
+      const nextIn = `lanp2p-v2/stream/${msg.attemptId}/from-${msg.from}`;
+      const nextOut = `lanp2p-v2/stream/${msg.attemptId}/from-${myId}`;
+      if (relayInTopic && relayInTopic !== nextIn && mqttClient) {
+        try { mqttClient.unsubscribe(relayInTopic); } catch {}
+      }
+      relayInTopic = nextIn;
+      relayOutTopic = nextOut;
+      currentAttemptId = msg.attemptId;
       await mqttSubscribe(relayInTopic, { qos: 1 });
       await mqttPublish(
         `lanp2p-v2/inbox/${msg.from}`,
@@ -1103,27 +1222,33 @@ async function handleInboxMessage(msg) {
       enterConnectedState(msg.from, "relay");
     } catch {}
   } else if (msg.kind === "hello-ack") {
-    if (msg.attemptId !== currentAttemptId || msg.from !== connectingTargetId) return;
+    const expectedPeer = connectingTargetId || pairedPeerId;
+    if (msg.attemptId !== currentAttemptId || msg.from !== expectedPeer) return;
     try {
       sharedAesKey = await deriveAesKey(msg.pubKey);
-      relayInTopic = `lanp2p-v2/stream/${msg.attemptId}/from-${msg.from}`;
-      relayOutTopic = `lanp2p-v2/stream/${msg.attemptId}/from-${myId}`;
+      const nextIn = `lanp2p-v2/stream/${msg.attemptId}/from-${msg.from}`;
+      const nextOut = `lanp2p-v2/stream/${msg.attemptId}/from-${myId}`;
+      if (relayInTopic && relayInTopic !== nextIn && mqttClient) {
+        try { mqttClient.unsubscribe(relayInTopic); } catch {}
+      }
+      relayInTopic = nextIn;
+      relayOutTopic = nextOut;
       await mqttSubscribe(relayInTopic, { qos: 1 });
       isRelayReady = true;
       enterConnectedState(msg.from, "relay");
     } catch {}
   } else if (msg.kind === "busy") {
     if (msg.from === connectingTargetId) {
-      cancelPendingConnection("相手は別の端末と接続中です。", true);
+      cancelPendingConnection("相手は別の端末と接続中です", true);
     }
   } else if (msg.kind === "bye") {
-    if (msg.from === connectedPeerId) {
-      resetToConnectPanel("相手が接続を終了しました。");
+    if (msg.from === pairedPeerId || msg.from === connectingTargetId) {
+      resetToConnectPanel("相手が接続を終了しました");
     }
   }
 }
 
-// === WebRTC PeerJS (Fast Direct LAN P2P) ===
+// === WebRTC PeerJS (Fast Direct P2P with Raw Framing) ===
 function initPeerJS() {
   if (typeof Peer === "undefined") return;
   peer = new Peer(PEER_PREFIX + myId, {
@@ -1139,8 +1264,9 @@ function initPeerJS() {
   peer.on("open", () => {
     peerReady = true;
     updateReadyIndicator();
-    if (connectingTargetId && (!dataConn || !dataConn.open)) {
-      firePeerConnect(connectingTargetId);
+    const target = connectingTargetId || pairedPeerId;
+    if (target && (!dataConn || !dataConn.open)) {
+      firePeerConnect(target);
     }
   });
 
@@ -1153,6 +1279,7 @@ function initPeerJS() {
       try { peer.destroy(); } catch {}
       peerReady = false;
       myId = generateCode();
+      sessionStorage.setItem(STORAGE_MY_ID, myId);
       renderMyCode(myId);
       if (mqttClient && mqttReady) {
         const oldInbox = currentInboxTopic;
@@ -1164,25 +1291,24 @@ function initPeerJS() {
       return;
     }
     if (err.type === "peer-unavailable") {
-      if (!mqttReady && !isRelayReady) {
-        cancelPendingConnection("エラー: 指定されたコードの相手が見つかりません。", true);
+      if (!mqttReady && !isRelayReady && connState === "connecting") {
+        cancelPendingConnection("相手が見つかりませんでした", true);
       }
-      return;
     }
   });
 }
 
 function firePeerConnect(targetId) {
-  if (!peer || !peerReady) return;
+  if (!peer || !peerReady || !targetId) return;
   try {
-    const conn = peer.connect(PEER_PREFIX + targetId, { reliable: true });
+    const conn = peer.connect(PEER_PREFIX + targetId, { reliable: true, serialization: "raw" });
     attachWebRtcConn(conn);
   } catch {}
 }
 
 function attachWebRtcConn(conn) {
   const remoteId = conn.peer.replace(PEER_PREFIX, "");
-  if (connectedPeerId && connectedPeerId !== remoteId) {
+  if (pairedPeerId && pairedPeerId !== remoteId) {
     conn.close();
     return;
   }
@@ -1191,9 +1317,16 @@ function attachWebRtcConn(conn) {
     return;
   }
   dataConn = conn;
+  if (conn.dataChannel) {
+    conn.dataChannel.binaryType = "arraybuffer";
+  }
 
   const onOpen = () => {
+    if (conn.dataChannel) {
+      conn.dataChannel.binaryType = "arraybuffer";
+    }
     isDirectP2P = true;
+    clearSilentP2PRetry();
     enterConnectedState(remoteId, "p2p");
   };
 
@@ -1203,22 +1336,63 @@ function attachWebRtcConn(conn) {
     conn.on("open", onOpen);
   }
 
-  conn.on("data", handleIncomingPayload);
-
-  conn.on("close", () => {
-    if (dataConn === conn) {
-      dataConn = null;
-      isDirectP2P = false;
-      if (isRelayReady && connectedPeerId) {
-        updateConnectionBadge();
-      } else if (connectedPeerId) {
-        resetToConnectPanel("相手との接続が切断されました。");
-      }
-    }
+  conn.on("data", (raw) => {
+    p2pRecvChain = p2pRecvChain
+      .then(async () => {
+        let bytes;
+        if (raw instanceof ArrayBuffer) bytes = new Uint8Array(raw);
+        else if (ArrayBuffer.isView(raw)) bytes = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+        else if (raw instanceof Blob) bytes = new Uint8Array(await raw.arrayBuffer());
+        else return;
+        handleFramePacket(bytes, "p2p");
+      })
+      .catch((err) => console.error("P2P recv error:", err));
   });
+
+  if (conn.peerConnection) {
+    conn.peerConnection.addEventListener("iceconnectionstatechange", () => {
+      const state = conn.peerConnection.iceConnectionState;
+      if ((state === "disconnected" || state === "failed") && dataConn === conn) {
+        handleWebRtcDrop(conn);
+      }
+    });
+  }
+
+  conn.on("close", () => handleWebRtcDrop(conn));
+  conn.on("error", () => handleWebRtcDrop(conn));
 }
 
-// === Connection Lifecycle ===
+function handleWebRtcDrop(conn) {
+  if (dataConn !== conn) return;
+  dataConn = null;
+  isDirectP2P = false;
+  if (!pairedPeerId) return;
+
+  if (isRelayReady && mqttReady) {
+    updateTransferStatus();
+    scheduleSilentP2PRetry();
+  } else {
+    startAutoReconnect(false);
+  }
+}
+
+function clearSilentP2PRetry() {
+  if (silentP2PRetryTimer) {
+    clearTimeout(silentP2PRetryTimer);
+    silentP2PRetryTimer = null;
+  }
+}
+
+function scheduleSilentP2PRetry() {
+  clearSilentP2PRetry();
+  silentP2PRetryTimer = setTimeout(() => {
+    if (pairedPeerId && (!dataConn || !dataConn.open) && peerReady) {
+      firePeerConnect(pairedPeerId);
+    }
+  }, 4000);
+}
+
+// === Connection & Auto-Reconnect Lifecycle ===
 function clearConnectionTimers() {
   if (connectTimeoutTimer) {
     clearTimeout(connectTimeoutTimer);
@@ -1226,51 +1400,58 @@ function clearConnectionTimers() {
   }
   retryHelloTimers.forEach((id) => clearTimeout(id));
   retryHelloTimers = [];
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
 }
 
 function connectToPeer(rawTargetId) {
   const targetId = normalizeCode(rawTargetId);
   if (targetId.length !== 5) {
-    setConnStatus("5桁の数字を入力してください。", true);
+    setConnStatus("5桁の数字を入力してください", true);
     return;
   }
   if (targetId === myId) {
-    setConnStatus("自分のコードには接続できません。", true);
+    setConnStatus("自分のコードには接続できません", true);
     return;
   }
 
   clearConnectionTimers();
+  connState = "connecting";
   connectingTargetId = targetId;
-  currentAttemptId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  currentAttemptId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-  setConnectingUI(true, targetId);
-  setConnStatus(`${targetId} に接続しています...`);
+  setConnectingUI(true);
+  setConnStatus(`${targetId} に接続しています`);
+  updateReadyIndicator();
 
-  if (mqttReady) {
-    sendMqttHello(targetId, currentAttemptId);
-  }
-  if (peerReady) {
-    firePeerConnect(targetId);
-  }
+  if (mqttReady) sendMqttOffer("hello", targetId, currentAttemptId);
+  if (peerReady) firePeerConnect(targetId);
 
   retryHelloTimers.push(
     setTimeout(() => {
-      if (connectingTargetId === targetId && !isRelayReady) sendMqttHello(targetId, currentAttemptId);
+      if (connState === "connecting" && connectingTargetId === targetId && !isRelayReady) {
+        sendMqttOffer("hello", targetId, currentAttemptId);
+      }
     }, 2500),
     setTimeout(() => {
-      if (connectingTargetId === targetId && !isRelayReady) sendMqttHello(targetId, currentAttemptId);
+      if (connState === "connecting" && connectingTargetId === targetId && !isRelayReady) {
+        sendMqttOffer("hello", targetId, currentAttemptId);
+      }
     }, 6000)
   );
 
   connectTimeoutTimer = setTimeout(() => {
-    if (connectingTargetId === targetId && !connectedPeerId) {
-      cancelPendingConnection("相手が見つかりませんでした。番号を確認し、相手側の画面が開いている状態で再度お試しください。", true);
+    if (connState === "connecting" && connectingTargetId === targetId && !pairedPeerId) {
+      cancelPendingConnection("相手が見つかりませんでした", true);
     }
   }, CONNECT_TIMEOUT_MS);
 }
 
-function cancelPendingConnection(statusText = "キャンセルしました。", isError = false) {
+function cancelPendingConnection(statusText = "", isError = false) {
   clearConnectionTimers();
+  connState = "idle";
   connectingTargetId = null;
   currentAttemptId = null;
   if (dataConn && !dataConn.open) {
@@ -1279,44 +1460,149 @@ function cancelPendingConnection(statusText = "キャンセルしました。", 
   }
   setConnectingUI(false);
   setConnStatus(statusText, isError);
+  updateReadyIndicator();
+}
+
+function startAutoReconnect(resetBackoff = false) {
+  if (!pairedPeerId) return;
+  if (hasLiveTransport()) {
+    enterConnectedState(pairedPeerId, isDirectP2P ? "p2p" : "relay");
+    return;
+  }
+  if (connState === "reconnecting" && !resetBackoff) return;
+
+  clearConnectionTimers();
+  if (resetBackoff) reconnectAttempt = 0;
+
+  const scheduleNext = () => {
+    if (!pairedPeerId || hasLiveTransport()) return;
+    if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+      connState = "disconnected";
+      updateTransferStatus();
+      updateReadyIndicator();
+      return;
+    }
+
+    const delay = RECONNECT_DELAYS[Math.min(reconnectAttempt, RECONNECT_DELAYS.length - 1)];
+    reconnectAttempt += 1;
+    connState = "reconnecting";
+    updateTransferStatus();
+    updateReadyIndicator();
+
+    reconnectTimer = setTimeout(() => {
+      if (!pairedPeerId || hasLiveTransport()) return;
+      wakeTransports();
+      currentAttemptId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      if (mqttReady) sendMqttOffer("reconnect", pairedPeerId, currentAttemptId);
+      if (peerReady) firePeerConnect(pairedPeerId);
+
+      reconnectTimer = setTimeout(scheduleNext, 3500);
+    }, delay);
+  };
+
+  scheduleNext();
+}
+
+function ensureConnected(timeoutMs = 10000) {
+  if (hasLiveTransport()) return Promise.resolve();
+  if (!pairedPeerId) return Promise.reject(new Error("未接続"));
+  wakeTransports();
+  startAutoReconnect(true);
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      connectedWaiters = connectedWaiters.filter((w) => w !== waiter);
+      reject(new Error("再接続がタイムアウトしました"));
+    }, timeoutMs);
+
+    const waiter = {
+      resolve: () => { clearTimeout(timer); resolve(); },
+      reject: (err) => { clearTimeout(timer); reject(err); }
+    };
+    connectedWaiters.push(waiter);
+  });
 }
 
 function enterConnectedState(remoteId, mode) {
   clearConnectionTimers();
   connectingTargetId = null;
-  connectedPeerId = remoteId;
+  pairedPeerId = remoteId;
+  sessionStorage.setItem(STORAGE_PAIRED_PEER, remoteId);
+  connState = "connected";
+  reconnectAttempt = 0;
+
   if (mode === "p2p") isDirectP2P = true;
   if (mode === "relay") isRelayReady = true;
 
   setConnectingUI(false);
   document.getElementById("connectPanel").classList.add("hidden");
   document.getElementById("transferPanel").classList.remove("hidden");
-  updateConnectionBadge();
+  document.getElementById("peerIdLabel").textContent = remoteId;
+
+  updateTransferStatus();
+  updateReadyIndicator();
+
+  while (connectedWaiters.length > 0) {
+    connectedWaiters.shift().resolve();
+  }
 
   if (window.location.search) {
     window.history.replaceState({}, document.title, window.location.pathname);
   }
 }
 
-function updateConnectionBadge() {
-  const badge = document.getElementById("peerBadge");
-  if (isDirectP2P) {
-    badge.textContent = `⚡ P2P直結 · ${connectedPeerId}`;
-    badge.classList.add("is-p2p");
+function updateTransferStatus() {
+  const chip = document.getElementById("modeChip");
+  const chipIconUse = document.querySelector("#modeChipIcon use");
+  const chipIconSvg = document.getElementById("modeChipIcon");
+  const chipText = document.getElementById("modeChipText");
+  const reconnectBtn = document.getElementById("reconnectBtn");
+  const dropZone = document.getElementById("dropZone");
+
+  chip.className = "mode-chip";
+  chipIconSvg.classList.remove("is-spinning");
+
+  if (connState === "connected" && isDirectP2P) {
+    chip.classList.add("is-p2p");
+    chipIconUse.setAttribute("href", "#icon-bolt");
+    chipText.textContent = "P2P";
+    reconnectBtn.classList.add("hidden");
+    dropZone.classList.remove("is-disabled");
+  } else if (connState === "connected" && isRelayReady) {
+    chip.classList.add("is-relay");
+    chipIconUse.setAttribute("href", "#icon-shield");
+    chipText.textContent = "暗号化";
+    reconnectBtn.classList.add("hidden");
+    dropZone.classList.remove("is-disabled");
+  } else if (connState === "reconnecting") {
+    chip.classList.add("is-reconnecting");
+    chipIconUse.setAttribute("href", "#icon-refresh");
+    chipIconSvg.classList.add("is-spinning");
+    chipText.textContent = `再接続中 ${reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS}`;
+    reconnectBtn.classList.remove("hidden");
+    dropZone.classList.add("is-disabled");
   } else {
-    badge.textContent = `🔒 セキュア接続 · ${connectedPeerId}`;
-    badge.classList.remove("is-p2p");
+    chip.classList.add("is-disconnected");
+    chipIconUse.setAttribute("href", "#icon-close");
+    chipText.textContent = "切断";
+    reconnectBtn.classList.remove("hidden");
+    dropZone.classList.add("is-disabled");
   }
 }
 
-function resetToConnectPanel(statusMsg = "待機中") {
+function resetToConnectPanel(statusMsg = "") {
   clearConnectionTimers();
+  clearSilentP2PRetry();
+  connState = "idle";
   connectingTargetId = null;
+  pairedPeerId = null;
   currentAttemptId = null;
-  connectedPeerId = null;
+  reconnectAttempt = 0;
   isDirectP2P = false;
   isRelayReady = false;
   sharedAesKey = null;
+
+  sessionStorage.removeItem(STORAGE_PAIRED_PEER);
 
   if (relayInTopic && mqttClient) {
     try { mqttClient.unsubscribe(relayInTopic); } catch {}
@@ -1333,11 +1619,14 @@ function resetToConnectPanel(statusMsg = "待機中") {
     pendingAckWaiter.reject(new Error("Disconnected"));
     pendingAckWaiter = null;
   }
+  while (connectedWaiters.length > 0) {
+    connectedWaiters.shift().reject(new Error("Disconnected"));
+  }
 
   incomingFileInfo = null;
   incomingChunks = [];
   receivedSize = 0;
-  expectedRelaySeq = 0;
+  expectedSeq = 0;
 
   document.getElementById("sendProgressBox").style.display = "none";
   document.getElementById("recvProgressBox").style.display = "none";
@@ -1345,23 +1634,37 @@ function resetToConnectPanel(statusMsg = "待機中") {
   document.getElementById("connectPanel").classList.remove("hidden");
   setConnectingUI(false);
   setConnStatus(statusMsg, false);
+  updateReadyIndicator();
 }
 
-// === File Sending (Hybrid P2P + E2EE WSS Relay) ===
-function sendFiles(files) {
-  if (!connectedPeerId || (!isDirectP2P && !isRelayReady)) {
-    alert("接続されていません");
-    return;
-  }
+// === Framed File Sending (Raw P2P + Windowed Paced E2EE Relay) ===
+function buildControlFrame(obj) {
+  const jsonBytes = textEncoder.encode(JSON.stringify(obj));
+  const frame = new Uint8Array(1 + jsonBytes.length);
+  frame[0] = 0x01;
+  frame.set(jsonBytes, 1);
+  return frame;
+}
+
+function buildChunkFrame(seq, chunkBytes) {
+  const frame = new Uint8Array(1 + 4 + chunkBytes.length);
+  frame[0] = 0x02;
+  new DataView(frame.buffer).setUint32(1, seq, false);
+  frame.set(chunkBytes, 5);
+  return frame;
+}
+
+function sendFiles(files, onAfterDone) {
+  if (!pairedPeerId) return;
   const fileArray = Array.from(files);
   sendQueue = sendQueue
     .then(() => processSendQueue(fileArray))
     .catch((err) => {
       console.error(err);
       document.getElementById("sendProgressBox").style.display = "none";
-      if (connectedPeerId) {
-        alert("送信中にエラーが発生しました: " + (err && err.message ? err.message : err));
-      }
+    })
+    .finally(() => {
+      if (typeof onAfterDone === "function") onAfterDone();
     });
 }
 
@@ -1373,66 +1676,36 @@ async function processSendQueue(files) {
 
   progressBox.style.display = "block";
 
-  for (const file of files) {
-    fileNameEl.textContent = `送信中: ${file.name}`;
+  for (let idx = 0; idx < files.length; idx++) {
+    const file = files[idx];
+    await ensureConnected(10000);
+
+    fileNameEl.textContent = file.name;
     progressBar.value = 0;
     percentEl.textContent = "0%";
 
-    const useP2P = Boolean(dataConn && dataConn.open);
-    if (useP2P) {
+    if (dataConn && dataConn.open) {
       await sendFileViaP2P(file, progressBar, percentEl);
-    } else if (isRelayReady) {
-      await sendFileViaRelay(file, progressBar, percentEl);
     } else {
-      throw new Error("通信経路が切断されています");
+      await sendFileViaRelay(file, progressBar, percentEl);
     }
 
     addFileToList(file.name, file.size, file.type, file, "送信");
+    if (idx < files.length - 1) {
+      await sleep(50);
+    }
   }
 
-  setTimeout(() => { progressBox.style.display = "none"; }, 1800);
+  setTimeout(() => { progressBox.style.display = "none"; }, 1400);
 }
 
-async function sendFileViaP2P(file, progressBar, percentEl) {
-  dataConn.send({
-    type: "file-start",
-    name: file.name,
-    size: file.size,
-    mime: file.type || "application/octet-stream"
-  });
-
-  let offset = 0;
-  const dc = dataConn.dataChannel;
-
-  while (offset < file.size) {
-    if (!dataConn || !dataConn.open) {
-      throw new Error("P2P接続が切断されました");
-    }
-    if (dc && dc.bufferedAmount > 1 * 1024 * 1024) {
-      await new Promise((r) => setTimeout(r, 40));
-      continue;
-    }
-
-    const slice = file.slice(offset, offset + P2P_CHUNK_SIZE);
-    const buffer = await slice.arrayBuffer();
-    dataConn.send({ type: "file-chunk", data: buffer });
-
-    offset += buffer.byteLength;
-    const percent = file.size > 0 ? Math.min(100, Math.round((offset / file.size) * 100)) : 100;
-    progressBar.value = percent;
-    percentEl.textContent = `${percent}%`;
-  }
-
-  dataConn.send({ type: "file-end" });
-  progressBar.value = 100;
-  percentEl.textContent = "100%";
-}
-
-function waitForChunkAck(transferId, seq, timeoutMs = 15000) {
+function waitForChunkAck(transferId, seq, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      pendingAckWaiter = null;
-      reject(new Error("受信側からの応答がタイムアウトしました"));
+      if (pendingAckWaiter && pendingAckWaiter.transferId === transferId) {
+        pendingAckWaiter = null;
+      }
+      reject(new Error("ACK timeout"));
     }, timeoutMs);
 
     pendingAckWaiter = {
@@ -1444,14 +1717,58 @@ function waitForChunkAck(transferId, seq, timeoutMs = 15000) {
   });
 }
 
+async function sendFileViaP2P(file, progressBar, percentEl) {
+  const transferId = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+  dataConn.send(buildControlFrame({
+    type: "file-start",
+    transferId,
+    name: file.name,
+    size: file.size,
+    mime: file.type || "application/octet-stream"
+  }));
+
+  let offset = 0;
+  let seq = 0;
+  const dc = dataConn.dataChannel;
+
+  while (offset < file.size) {
+    if (!dataConn || !dataConn.open) {
+      throw new Error("P2P closed");
+    }
+    while ((dc && dc.bufferedAmount > 256 * 1024) || dataConn.bufferSize > 0) {
+      if (!dataConn || !dataConn.open) throw new Error("P2P closed");
+      await sleep(15);
+    }
+
+    const slice = file.slice(offset, offset + P2P_CHUNK_SIZE);
+    const chunkBytes = new Uint8Array(await slice.arrayBuffer());
+    dataConn.send(buildChunkFrame(seq, chunkBytes));
+
+    offset += chunkBytes.length;
+    const percent = file.size > 0 ? Math.min(100, Math.round((offset / file.size) * 100)) : 100;
+    progressBar.value = percent;
+    percentEl.textContent = `${percent}%`;
+
+    if ((seq + 1) % P2P_ACK_INTERVAL === 0 || offset >= file.size) {
+      await waitForChunkAck(transferId, seq, 10000);
+    }
+    seq += 1;
+  }
+
+  dataConn.send(buildControlFrame({ type: "file-end", transferId }));
+  progressBar.value = 100;
+  percentEl.textContent = "100%";
+}
+
 async function sendRelayControl(obj) {
-  const plain = new TextEncoder().encode(JSON.stringify(obj));
-  const packet = await encryptPacket(0x01, plain);
+  const frame = buildControlFrame(obj);
+  const packet = await encryptPacket(frame);
   await mqttPublish(relayOutTopic, packet, { qos: 1 });
 }
 
 async function sendFileViaRelay(file, progressBar, percentEl) {
   const transferId = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+  await ensureConnected(10000);
   await sendRelayControl({
     type: "file-start",
     transferId,
@@ -1460,113 +1777,139 @@ async function sendFileViaRelay(file, progressBar, percentEl) {
     mime: file.type || "application/octet-stream"
   });
 
-  let offset = 0;
-  let seq = 0;
+  let winStartOffset = 0;
+  let winStartSeq = 0;
 
-  while (offset < file.size) {
-    if (!isRelayReady || !mqttReady) {
-      throw new Error("リレー接続が切断されました");
+  while (winStartOffset < file.size) {
+    let winEndOffset = winStartOffset;
+    let winEndSeq = winStartSeq;
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        await ensureConnected(10000);
+        let offset = winStartOffset;
+        let seq = winStartSeq;
+
+        for (let i = 0; i < RELAY_WINDOW && offset < file.size; i++) {
+          const slice = file.slice(offset, offset + RELAY_CHUNK_SIZE);
+          const chunkBytes = new Uint8Array(await slice.arrayBuffer());
+          const packet = await encryptPacket(buildChunkFrame(seq, chunkBytes));
+
+          await mqttPublish(relayOutTopic, packet, { qos: 0 });
+          offset += chunkBytes.length;
+          winEndOffset = offset;
+          winEndSeq = seq;
+
+          const percent = file.size > 0 ? Math.min(100, Math.round((offset / file.size) * 100)) : 100;
+          progressBar.value = percent;
+          percentEl.textContent = `${percent}%`;
+
+          seq += 1;
+          await sleep(RELAY_PACE_MS);
+        }
+
+        await waitForChunkAck(transferId, winEndSeq, 5000);
+        winStartOffset = winEndOffset;
+        winStartSeq = winEndSeq + 1;
+        break;
+      } catch (err) {
+        if (attempt === 3) throw err;
+        await sleep(300);
+      }
     }
-    const slice = file.slice(offset, offset + RELAY_CHUNK_SIZE);
-    const chunkBytes = new Uint8Array(await slice.arrayBuffer());
-
-    const framed = new Uint8Array(4 + chunkBytes.length);
-    new DataView(framed.buffer).setUint32(0, seq, false);
-    framed.set(chunkBytes, 4);
-
-    const packet = await encryptPacket(0x02, framed);
-    await mqttPublish(relayOutTopic, packet, { qos: 1 });
-
-    offset += chunkBytes.length;
-    const percent = file.size > 0 ? Math.min(100, Math.round((offset / file.size) * 100)) : 100;
-    progressBar.value = percent;
-    percentEl.textContent = `${percent}%`;
-
-    if ((seq + 1) % RELAY_ACK_INTERVAL === 0 || offset >= file.size) {
-      await waitForChunkAck(transferId, seq, 15000);
-    }
-    seq += 1;
   }
 
+  await ensureConnected(10000);
   await sendRelayControl({ type: "file-end", transferId });
   progressBar.value = 100;
   percentEl.textContent = "100%";
 }
 
-// === File Receiving ===
+// === Framed File Receiving ===
 async function handleEncryptedRelayPacket(rawPayload) {
   if (!sharedAesKey) return;
   try {
-    const { frameType, plainUint8 } = await decryptPacket(rawPayload);
-    if (frameType === 0x01) {
-      const msg = JSON.parse(new TextDecoder().decode(plainUint8));
-      if (msg.type === "chunk-ack") {
-        if (pendingAckWaiter && pendingAckWaiter.transferId === msg.transferId && msg.seq >= pendingAckWaiter.seq) {
-          pendingAckWaiter.resolve();
-        }
-        return;
-      }
-      handleIncomingPayload(msg, true);
-    } else if (frameType === 0x02) {
-      if (!incomingFileInfo) return;
-      const view = new DataView(plainUint8.buffer, plainUint8.byteOffset, plainUint8.byteLength);
-      const seq = view.getUint32(0, false);
-      if (seq < expectedRelaySeq) return;
-      expectedRelaySeq = seq + 1;
-
-      const chunk = plainUint8.slice(4);
-      handleIncomingPayload({ type: "file-chunk", data: chunk }, true);
-
-      if ((seq + 1) % RELAY_ACK_INTERVAL === 0 || receivedSize >= incomingFileInfo.size) {
-        sendRelayControl({
-          type: "chunk-ack",
-          transferId: incomingFileInfo.transferId,
-          seq
-        }).catch(() => {});
-      }
-    }
+    const plainBytes = await decryptPacket(rawPayload);
+    handleFramePacket(plainBytes, "relay");
   } catch (err) {
     console.error("Relay decrypt error:", err);
   }
 }
 
-function handleIncomingPayload(payload) {
-  const progressBox = document.getElementById("recvProgressBox");
-  const progressBar = document.getElementById("recvProgress");
-  const fileNameEl = document.getElementById("recvFileName");
-  const percentEl = document.getElementById("recvPercent");
+function sendAck(transferId, seq, transport) {
+  const ackObj = { type: "chunk-ack", transferId, seq };
+  if (transport === "p2p" && dataConn && dataConn.open) {
+    try { dataConn.send(buildControlFrame(ackObj)); } catch {}
+  } else if (isRelayReady && mqttReady) {
+    sendRelayControl(ackObj).catch(() => {});
+  }
+}
 
-  if (payload.type === "file-start") {
-    incomingFileInfo = payload;
-    incomingChunks = [];
-    receivedSize = 0;
-    expectedRelaySeq = 0;
+function handleFramePacket(bytes, transport) {
+  if (!bytes || bytes.length === 0) return;
+  const frameType = bytes[0];
 
-    progressBox.style.display = "block";
-    fileNameEl.textContent = `受信中: ${payload.name}`;
-    progressBar.value = 0;
-    percentEl.textContent = "0%";
-  } else if (payload.type === "file-chunk") {
-    if (!incomingFileInfo) return;
-    incomingChunks.push(payload.data);
-    const chunkBytes = payload.data.byteLength ?? payload.data.size ?? 0;
-    receivedSize += chunkBytes;
+  if (frameType === 0x01) {
+    const msg = JSON.parse(textDecoder.decode(bytes.subarray(1)));
+    if (msg.type === "chunk-ack") {
+      if (pendingAckWaiter && pendingAckWaiter.transferId === msg.transferId && msg.seq >= pendingAckWaiter.seq) {
+        pendingAckWaiter.resolve();
+      }
+      return;
+    }
 
-    const percent = incomingFileInfo.size > 0
-      ? Math.min(100, Math.round((receivedSize / incomingFileInfo.size) * 100))
-      : 100;
-    progressBar.value = percent;
-    percentEl.textContent = `${percent}%`;
-  } else if (payload.type === "file-end") {
-    if (!incomingFileInfo) return;
-    const blob = new Blob(incomingChunks, { type: incomingFileInfo.mime || "application/octet-stream" });
-    addFileToList(incomingFileInfo.name, incomingFileInfo.size, incomingFileInfo.mime, blob, "受信");
+    const progressBox = document.getElementById("recvProgressBox");
+    const progressBar = document.getElementById("recvProgress");
+    const fileNameEl = document.getElementById("recvFileName");
+    const percentEl = document.getElementById("recvPercent");
 
-    incomingFileInfo = null;
-    incomingChunks = [];
-    receivedSize = 0;
-    expectedRelaySeq = 0;
-    setTimeout(() => { progressBox.style.display = "none"; }, 1800);
+    if (msg.type === "file-start") {
+      incomingFileInfo = msg;
+      incomingChunks = [];
+      receivedSize = 0;
+      expectedSeq = 0;
+      incomingAckInterval = transport === "p2p" ? P2P_ACK_INTERVAL : RELAY_WINDOW;
+
+      progressBox.style.display = "block";
+      fileNameEl.textContent = msg.name;
+      progressBar.value = 0;
+      percentEl.textContent = "0%";
+    } else if (msg.type === "file-end") {
+      if (!incomingFileInfo) return;
+      const blob = new Blob(incomingChunks, { type: incomingFileInfo.mime || "application/octet-stream" });
+      addFileToList(incomingFileInfo.name, incomingFileInfo.size, incomingFileInfo.mime, blob, "受信");
+
+      incomingFileInfo = null;
+      incomingChunks = [];
+      receivedSize = 0;
+      expectedSeq = 0;
+      setTimeout(() => { progressBox.style.display = "none"; }, 1400);
+    }
+    return;
+  }
+
+  if (frameType === 0x02) {
+    if (!incomingFileInfo || bytes.length < 5) return;
+    const seq = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(1, false);
+    const chunk = bytes.slice(5);
+
+    if (seq === expectedSeq) {
+      incomingChunks.push(chunk);
+      receivedSize += chunk.byteLength;
+      expectedSeq = seq + 1;
+
+      const percent = incomingFileInfo.size > 0
+        ? Math.min(100, Math.round((receivedSize / incomingFileInfo.size) * 100))
+        : 100;
+      document.getElementById("recvProgress").value = percent;
+      document.getElementById("recvPercent").textContent = `${percent}%`;
+    } else if (seq > expectedSeq) {
+      return;
+    }
+
+    if (((seq + 1) % incomingAckInterval === 0) || receivedSize >= incomingFileInfo.size) {
+      sendAck(incomingFileInfo.transferId, expectedSeq - 1, transport);
+    }
   }
 }
 
@@ -1577,10 +1920,21 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function createSvgIcon(symbolId, size = 15) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "svg-icon");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", `#${symbolId}`);
+  svg.append(use);
+  return svg;
+}
+
 function addFileToList(name, size, mime, blob, statusLabel) {
+  document.getElementById("historyCard").classList.remove("hidden");
   const list = document.getElementById("fileList");
-  const emptyEl = document.getElementById("fileEmpty");
-  if (emptyEl) emptyEl.remove();
 
   const li = document.createElement("li");
   li.className = "file-item";
@@ -1595,10 +1949,10 @@ function addFileToList(name, size, mime, blob, statusLabel) {
   info.className = "file-info";
   const nameDiv = document.createElement("div");
   nameDiv.className = "file-name";
-  nameDiv.textContent = `[${statusLabel}] ${name}`;
+  nameDiv.textContent = name;
   const metaDiv = document.createElement("div");
   metaDiv.className = "file-meta";
-  metaDiv.textContent = formatFileSize(size);
+  metaDiv.textContent = `${statusLabel} · ${formatFileSize(size)}`;
   info.append(nameDiv, metaDiv);
 
   const actions = document.createElement("div");
@@ -1613,7 +1967,8 @@ function addFileToList(name, size, mime, blob, statusLabel) {
     const shareBtn = document.createElement("button");
     shareBtn.type = "button";
     shareBtn.className = "share-file-btn";
-    shareBtn.textContent = isImage ? "共有 / 写真に保存" : "共有 / 保存";
+    shareBtn.setAttribute("aria-label", `${name} を共有`);
+    shareBtn.append(createSvgIcon("icon-share", 14), document.createTextNode("共有"));
     shareBtn.addEventListener("click", async () => {
       try {
         await navigator.share({ files: [shareFile], title: name });
@@ -1626,7 +1981,8 @@ function addFileToList(name, size, mime, blob, statusLabel) {
   dlLink.href = url;
   dlLink.download = name;
   dlLink.className = "dl-btn";
-  dlLink.textContent = "保存";
+  dlLink.setAttribute("aria-label", `${name} を保存`);
+  dlLink.append(createSvgIcon("icon-download", 14), document.createTextNode("保存"));
   actions.append(dlLink);
 
   header.append(info, actions);
@@ -1636,7 +1992,7 @@ function addFileToList(name, size, mime, blob, statusLabel) {
     const img = document.createElement("img");
     img.src = url;
     img.className = "preview-img";
-    img.alt = `${name} のプレビュー`;
+    img.alt = name;
     li.append(img);
   }
 
@@ -1659,25 +2015,30 @@ function legacyCopy(text) {
   }
 }
 
-function showCopyTip(message) {
+function showCopyTip(message, ok) {
+  const btn = document.getElementById("copyCodeBtn");
   const tip = document.getElementById("copyTip");
   clearTimeout(copyTipTimer);
   let text = message;
   if (text === lastCopyMessage) text += "\u00A0";
   lastCopyMessage = message;
+  if (ok) btn.setAttribute("data-copied", "");
+  else btn.removeAttribute("data-copied");
   tip.textContent = "";
   tip.classList.add("is-visible");
   requestAnimationFrame(() => { tip.textContent = text; });
   copyTipTimer = setTimeout(() => {
+    btn.removeAttribute("data-copied");
     tip.classList.remove("is-visible");
     tip.textContent = "";
-  }, 2000);
+  }, 1800);
 }
 
 function setupUIEvents() {
   const targetInput = document.getElementById("targetId");
   const connectBtn = document.getElementById("connectBtn");
   const cancelBtn = document.getElementById("cancelConnectBtn");
+  const reconnectBtn = document.getElementById("reconnectBtn");
   const disconnectBtn = document.getElementById("disconnectBtn");
   const copyCodeBtn = document.getElementById("copyCodeBtn");
   const shareLinkBtn = document.getElementById("shareLinkBtn");
@@ -1687,7 +2048,7 @@ function setupUIEvents() {
     shareLinkBtn.addEventListener("click", async () => {
       const url = `${window.location.origin}${window.location.pathname}?connect=${myId}`;
       try {
-        await navigator.share({ title: "AirShare 接続リンク", text: `接続コード: ${myId}`, url });
+        await navigator.share({ title: "AirShare", text: `コード: ${myId}`, url });
       } catch {}
     });
   }
@@ -1695,9 +2056,10 @@ function setupUIEvents() {
   copyCodeBtn.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(myId);
-      showCopyTip("コピーしました");
+      showCopyTip("コピーしました", true);
     } catch {
-      showCopyTip(legacyCopy(myId) ? "コピーしました" : "コピー失敗");
+      const ok = legacyCopy(myId);
+      showCopyTip(ok ? "コピーしました" : "コピー失敗", ok);
     }
   });
 
@@ -1713,14 +2075,19 @@ function setupUIEvents() {
   });
 
   cancelBtn.addEventListener("click", () => {
-    cancelPendingConnection("キャンセルしました。", false);
+    cancelPendingConnection("キャンセルしました", false);
+  });
+
+  reconnectBtn.addEventListener("click", () => {
+    wakeTransports();
+    startAutoReconnect(true);
   });
 
   disconnectBtn.addEventListener("click", () => {
-    if (connectedPeerId && mqttClient && mqttReady) {
-      mqttPublish(`lanp2p-v2/inbox/${connectedPeerId}`, JSON.stringify({ kind: "bye", from: myId }), { qos: 1 }).catch(() => {});
+    if (pairedPeerId && mqttClient && mqttReady) {
+      mqttPublish(`lanp2p-v2/inbox/${pairedPeerId}`, JSON.stringify({ kind: "bye", from: myId }), { qos: 1 }).catch(() => {});
     }
-    resetToConnectPanel("切断しました。");
+    resetToConnectPanel("切断しました");
   });
 
   targetInput.addEventListener("keydown", (e) => {
@@ -1742,8 +2109,11 @@ function setupUIEvents() {
   });
 
   fileInput.addEventListener("change", (e) => {
-    if (e.target.files.length > 0) sendFiles(e.target.files);
-    fileInput.value = "";
+    if (e.target.files.length > 0) {
+      sendFiles(e.target.files, () => {
+        fileInput.value = "";
+      });
+    }
   });
 
   dropZone.addEventListener("dragover", (e) => {
