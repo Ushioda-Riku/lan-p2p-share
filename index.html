@@ -417,6 +417,46 @@
       letter-spacing: 2px;
     }
 
+    .id-pair {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .id-badge {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 4px;
+      padding: 3px 8px;
+      border-radius: 8px;
+      background: var(--fill);
+    }
+
+    .id-role {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--subtext);
+    }
+
+    .id-badge.is-self .peer-id-label {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      color: var(--subtext);
+    }
+
+    .id-badge.is-peer .peer-id-label {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      color: var(--text);
+    }
+
+    .id-sep-icon {
+      color: var(--subtext);
+    }
+
     .mode-chip {
       display: inline-flex;
       align-items: center;
@@ -575,6 +615,12 @@
       gap: 10px;
     }
 
+    .file-item.is-sent {
+      background: transparent;
+      border: 0.5px solid var(--sep);
+      padding: 10px 12px;
+    }
+
     .file-item:last-child {
       margin-bottom: 0;
     }
@@ -601,7 +647,38 @@
     .file-meta {
       font-size: 12px;
       color: var(--subtext);
-      margin-top: 2px;
+      margin-top: 3px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .dir-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .dir-badge.is-recv {
+      background: rgba(0, 122, 255, 0.13);
+      color: var(--accent);
+    }
+
+    .dir-badge.is-sent {
+      background: var(--fill);
+      color: var(--subtext);
+    }
+
+    .sent-check {
+      color: var(--green);
+      display: inline-flex;
+      align-items: center;
+      padding: 4px;
     }
 
     .file-actions {
@@ -645,6 +722,18 @@
 
     .hidden {
       display: none !important;
+    }
+
+    .visually-hidden:where(:not(:focus-within, :active)) {
+      position: absolute !important;
+      clip-path: inset(50%) !important;
+      overflow: hidden !important;
+      width: 1px !important;
+      height: 1px !important;
+      margin: -1px !important;
+      padding: 0 !important;
+      border: 0 !important;
+      white-space: nowrap !important;
     }
   </style>
 </head>
@@ -705,7 +794,7 @@
 
   <main>
     <div id="connectPanel">
-      <section class="card" aria-labelledby="myCodeHeading">
+      <section class="card">
         <div class="card-head">
           <h2 id="myCodeHeading">自分のコード</h2>
         </div>
@@ -729,7 +818,7 @@
         </div>
       </section>
 
-      <section class="card" aria-labelledby="targetHeading">
+      <section class="card">
         <div class="card-head">
           <h2 id="targetHeading">相手に接続</h2>
         </div>
@@ -748,11 +837,21 @@
     </div>
 
     <div id="transferPanel" class="hidden">
-      <section class="card" aria-labelledby="sendHeading">
+      <section class="card">
         <div class="card-head">
           <div class="session-meta">
-            <h2 id="sendHeading" hidden>転送</h2>
-            <span id="peerIdLabel" class="peer-id-label">-----</span>
+            <h2 id="sendHeading" class="visually-hidden">転送</h2>
+            <div class="id-pair">
+              <span class="id-badge is-self">
+                <span class="id-role">自分</span>
+                <span id="selfIdLabel" class="peer-id-label">-----</span>
+              </span>
+              <svg class="svg-icon id-sep-icon" width="13" height="13" aria-hidden="true"><use href="#icon-arrow-right"></use></svg>
+              <span class="id-badge is-peer">
+                <span class="id-role">相手</span>
+                <span id="peerIdLabel" class="peer-id-label">-----</span>
+              </span>
+            </div>
             <span id="modeChip" class="mode-chip" role="status">
               <svg id="modeChipIcon" class="svg-icon" width="13" height="13" aria-hidden="true"><use href="#icon-shield"></use></svg>
               <span id="modeChipText">接続中</span>
@@ -792,11 +891,11 @@
         </div>
       </section>
 
-      <section id="historyCard" class="card hidden" aria-labelledby="historyHeading">
+      <section id="historyCard" class="card hidden">
         <div class="card-head">
           <h2 id="historyHeading">履歴</h2>
         </div>
-        <ul id="fileList" class="file-list"></ul>
+        <ul id="fileList" class="file-list" role="list"></ul>
       </section>
     </div>
   </main>
@@ -828,6 +927,7 @@ const ENTROPY_HIST = new Uint16Array(256);
 
 let myId = "";
 let peer = null;
+let peerReady = false;
 let p2pLanes = new Map();
 
 const brokerSlots = [
@@ -864,6 +964,7 @@ const incomingTransfers = new Map();
 const txSlotMap = new Map();
 const outgoingTransfers = new Map();
 const earlyRelayChunks = [];
+const earlyP2PChunks = [];
 let nextTxSlot = 1;
 let legacyRecvId = null;
 let p2pRecvChain = Promise.resolve();
@@ -905,6 +1006,8 @@ window.addEventListener("DOMContentLoaded", () => {
     pairedPeerId = savedPeer;
     document.getElementById("connectPanel").classList.add("hidden");
     document.getElementById("transferPanel").classList.remove("hidden");
+    const selfLabel = document.getElementById("selfIdLabel");
+    if (selfLabel) selfLabel.textContent = myId;
     document.getElementById("peerIdLabel").textContent = savedPeer;
     startAutoReconnect(true);
   }
@@ -991,6 +1094,8 @@ function wakeTransports() {
 
 function renderMyCode(id) {
   document.getElementById("myId").textContent = id;
+  const selfLabel = document.getElementById("selfIdLabel");
+  if (selfLabel) selfLabel.textContent = id;
   const qrContainer = document.getElementById("qrcode");
   qrContainer.innerHTML = "";
   const connectUrl = `${window.location.origin}${window.location.pathname}?connect=${id}`;
@@ -1516,9 +1621,16 @@ function attachWebRtcConn(conn) {
     return;
   }
   const prev = p2pLanes.get(laneKey);
-  if (prev && prev.open && prev !== conn) {
-    conn.close();
-    return;
+  if (prev && prev !== conn) {
+    if (prev.open) {
+      conn.close();
+      return;
+    }
+    if (myId < remoteId) {
+      conn.close();
+      return;
+    }
+    try { prev.close(); } catch {}
   }
   p2pLanes.set(laneKey, conn);
 
@@ -1536,12 +1648,6 @@ function attachWebRtcConn(conn) {
     clearSilentP2PRetry();
     enterConnectedState(remoteId, "p2p");
   };
-
-  if (conn.open) {
-    onOpen();
-  } else {
-    conn.on("open", onOpen);
-  }
 
   conn.on("data", (raw) => {
     if (raw instanceof ArrayBuffer) {
@@ -1570,6 +1676,12 @@ function attachWebRtcConn(conn) {
 
   conn.on("close", () => handleWebRtcDrop(laneKey, conn));
   conn.on("error", () => handleWebRtcDrop(laneKey, conn));
+
+  if (conn.open) {
+    onOpen();
+  } else {
+    conn.on("open", onOpen);
+  }
 }
 
 function handleWebRtcDrop(laneKey, conn) {
@@ -1685,6 +1797,9 @@ function startAutoReconnect(resetBackoff = false) {
 
   clearConnectionTimers();
   if (resetBackoff) reconnectAttempt = 0;
+  if (resetBackoff || !currentAttemptId) {
+    currentAttemptId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
 
   const scheduleNext = () => {
     if (!pairedPeerId || hasLiveTransport()) return;
@@ -1704,7 +1819,6 @@ function startAutoReconnect(resetBackoff = false) {
     reconnectTimer = setTimeout(() => {
       if (!pairedPeerId || hasLiveTransport()) return;
       wakeTransports();
-      currentAttemptId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       if (hasAnyMqttReady()) sendMqttOffer("reconnect", pairedPeerId, currentAttemptId);
       if (peerReady) firePeerConnect(pairedPeerId);
 
@@ -1749,6 +1863,8 @@ function enterConnectedState(remoteId, mode) {
   setConnectingUI(false);
   document.getElementById("connectPanel").classList.add("hidden");
   document.getElementById("transferPanel").classList.remove("hidden");
+  const selfLabel = document.getElementById("selfIdLabel");
+  if (selfLabel) selfLabel.textContent = myId;
   document.getElementById("peerIdLabel").textContent = remoteId;
 
   updateTransferStatus();
@@ -1840,6 +1956,7 @@ function resetToConnectPanel(statusMsg = "") {
   incomingTransfers.clear();
   txSlotMap.clear();
   earlyRelayChunks.length = 0;
+  earlyP2PChunks.length = 0;
   legacyRecvId = null;
 
   while (connectedWaiters.length > 0) {
@@ -2093,7 +2210,8 @@ function pickEcfBrokerSlot(excludeSlotId = -1) {
 
 async function sendFileUnified(file, startedAt) {
   const transferId = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
-  const txSlot = (nextTxSlot++) & 0xff;
+  const txSlot = nextTxSlot;
+  nextTxSlot = (nextTxSlot % 255) + 1;
   const startedOnP2P = hasOpenP2P();
   const chunkSize = startedOnP2P ? getNegotiatedP2PChunkSize() : RELAY_CHUNK_SIZE;
   const totalChunks = file.size === 0 ? 0 : Math.ceil(file.size / chunkSize);
@@ -2415,10 +2533,10 @@ function handleEncryptedRelayPacket(rawPayload) {
   if (frameType === 0x02 || frameType === 0x03 || frameType === 0x04) {
     if (bytes.length < 11) return;
     const txSlot = bytes[10];
-    const transferId = txSlotMap.get(txSlot);
-    const state = transferId ? incomingTransfers.get(transferId) : getRecvState(null);
+    const transferId = txSlot > 0 ? txSlotMap.get(txSlot) : null;
+    const state = transferId ? incomingTransfers.get(transferId) : (txSlot === 0 ? getRecvState(null) : null);
     if (!state || !state.salt) {
-      earlyRelayChunks.push(bytes.slice());
+      if (earlyRelayChunks.length < 512) earlyRelayChunks.push(bytes.slice());
       return;
     }
     decodeEncryptedDataPacket(state, bytes, "relay");
@@ -2446,8 +2564,8 @@ function drainEarlyRelayChunks() {
   while (earlyRelayChunks.length > 0) {
     const bytes = earlyRelayChunks.shift();
     const txSlot = bytes[10];
-    const transferId = txSlotMap.get(txSlot);
-    const state = transferId ? incomingTransfers.get(transferId) : getRecvState(null);
+    const transferId = txSlot > 0 ? txSlotMap.get(txSlot) : null;
+    const state = transferId ? incomingTransfers.get(transferId) : (txSlot === 0 ? getRecvState(null) : null);
     if (!state || !state.salt) {
       remaining.push(bytes);
       continue;
@@ -2455,6 +2573,45 @@ function drainEarlyRelayChunks() {
     decodeEncryptedDataPacket(state, bytes, "relay");
   }
   for (const r of remaining) earlyRelayChunks.push(r);
+}
+
+function applyP2PDataPacket(state, bytes) {
+  const frameType = bytes[0];
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const seq = view.getUint32(1, false);
+  const sentMs32 = view.getUint32(5, false);
+  const body = bytes.slice(11);
+  if (frameType === 0x02 || frameType === 0x04) {
+    decodeBodyAndApply(state, frameType, seq, sentMs32, body, "p2p");
+  } else {
+    state.pendingDecodes += 1;
+    decodeBodyAndApply(state, frameType, seq, sentMs32, body, "p2p")
+      .finally(() => {
+        state.pendingDecodes -= 1;
+        if (state.pendingDecodes === 0 && state.decodeDrainResolve) {
+          const fn = state.decodeDrainResolve;
+          state.decodeDrainResolve = null;
+          fn();
+        }
+      });
+  }
+}
+
+function drainEarlyP2PChunks() {
+  if (earlyP2PChunks.length === 0) return;
+  const remaining = [];
+  while (earlyP2PChunks.length > 0) {
+    const bytes = earlyP2PChunks.shift();
+    const txSlot = bytes[10];
+    const transferId = txSlot > 0 ? txSlotMap.get(txSlot) : null;
+    const state = transferId ? incomingTransfers.get(transferId) : (txSlot === 0 ? getRecvState(null) : null);
+    if (!state) {
+      remaining.push(bytes);
+      continue;
+    }
+    applyP2PDataPacket(state, bytes);
+  }
+  for (const r of remaining) earlyP2PChunks.push(r);
 }
 
 function handleP2PRawPacket(bytes) {
@@ -2469,28 +2626,14 @@ function handleP2PRawPacket(bytes) {
 
   if (frameType === 0x02 || frameType === 0x03 || frameType === 0x04) {
     if (bytes.length < 11) return;
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const seq = view.getUint32(1, false);
-    const sentMs32 = view.getUint32(5, false);
     const txSlot = bytes[10];
-    const transferId = txSlotMap.get(txSlot);
-    const state = transferId ? incomingTransfers.get(transferId) : getRecvState(null);
-    if (!state) return;
-    const body = bytes.slice(11);
-    if (frameType === 0x02 || frameType === 0x04) {
-      decodeBodyAndApply(state, frameType, seq, sentMs32, body, "p2p");
-    } else {
-      state.pendingDecodes += 1;
-      decodeBodyAndApply(state, frameType, seq, sentMs32, body, "p2p")
-        .finally(() => {
-          state.pendingDecodes -= 1;
-          if (state.pendingDecodes === 0 && state.decodeDrainResolve) {
-            const fn = state.decodeDrainResolve;
-            state.decodeDrainResolve = null;
-            fn();
-          }
-        });
+    const transferId = txSlot > 0 ? txSlotMap.get(txSlot) : null;
+    const state = transferId ? incomingTransfers.get(transferId) : (txSlot === 0 ? getRecvState(null) : null);
+    if (!state) {
+      if (earlyP2PChunks.length < 512) earlyP2PChunks.push(bytes.slice());
+      return;
     }
+    applyP2PDataPacket(state, bytes);
   }
 }
 
@@ -2615,6 +2758,8 @@ async function handleControlJson(msg, transport) {
 
     document.getElementById("recvProgressBox").style.display = "block";
     scheduleRecvUi(msg.name, 0, msg.size, state.startedAt);
+    drainEarlyP2PChunks();
+    drainEarlyRelayChunks();
     return;
   }
 
@@ -2700,11 +2845,9 @@ function addFileToList(name, size, mime, blob, statusLabel) {
   document.getElementById("historyCard").classList.remove("hidden");
   const list = document.getElementById("fileList");
 
+  const isSent = statusLabel === "送信";
   const li = document.createElement("li");
-  li.className = "file-item";
-
-  const url = URL.createObjectURL(blob);
-  const isImage = mime && mime.startsWith("image/");
+  li.className = isSent ? "file-item is-sent" : "file-item is-received";
 
   const header = document.createElement("div");
   header.className = "file-header";
@@ -2714,50 +2857,71 @@ function addFileToList(name, size, mime, blob, statusLabel) {
   const nameDiv = document.createElement("div");
   nameDiv.className = "file-name";
   nameDiv.textContent = name;
+
   const metaDiv = document.createElement("div");
   metaDiv.className = "file-meta";
-  metaDiv.textContent = `${statusLabel} · ${formatFileSize(size)}`;
+  const badge = document.createElement("span");
+  badge.className = isSent ? "dir-badge is-sent" : "dir-badge is-recv";
+  badge.append(
+    createSvgIcon(isSent ? "icon-upload" : "icon-download", 12),
+    document.createTextNode(isSent ? "送信済み" : "受信")
+  );
+  metaDiv.append(badge, document.createTextNode(formatFileSize(size)));
   info.append(nameDiv, metaDiv);
 
   const actions = document.createElement("div");
   actions.className = "file-actions";
 
-  let shareFile = null;
-  try {
-    shareFile = new File([blob], name, { type: mime || "application/octet-stream" });
-  } catch {}
+  if (isSent) {
+    const checkSpan = document.createElement("span");
+    checkSpan.className = "sent-check";
+    checkSpan.setAttribute("aria-hidden", "true");
+    checkSpan.append(createSvgIcon("icon-check", 16));
+    actions.append(checkSpan);
+    header.append(info, actions);
+    li.append(header);
+  } else {
+    const url = URL.createObjectURL(blob);
+    const isImage = mime && mime.startsWith("image/");
 
-  if (shareFile && navigator.canShare && navigator.canShare({ files: [shareFile] })) {
-    const shareBtn = document.createElement("button");
-    shareBtn.type = "button";
-    shareBtn.className = "share-file-btn";
-    shareBtn.setAttribute("aria-label", `${name} を共有`);
-    shareBtn.append(createSvgIcon("icon-share", 14), document.createTextNode("共有"));
-    shareBtn.addEventListener("click", async () => {
-      try {
-        await navigator.share({ files: [shareFile], title: name });
-      } catch {}
-    });
-    actions.append(shareBtn);
-  }
+    let shareFile = null;
+    try {
+      shareFile = new File([blob], name, { type: mime || "application/octet-stream" });
+    } catch {}
 
-  const dlLink = document.createElement("a");
-  dlLink.href = url;
-  dlLink.download = name;
-  dlLink.className = "dl-btn";
-  dlLink.setAttribute("aria-label", `${name} を保存`);
-  dlLink.append(createSvgIcon("icon-download", 14), document.createTextNode("保存"));
-  actions.append(dlLink);
+    if (shareFile && navigator.canShare && navigator.canShare({ files: [shareFile] })) {
+      const shareBtn = document.createElement("button");
+      shareBtn.type = "button";
+      shareBtn.className = "share-file-btn";
+      shareBtn.setAttribute("aria-label", `${name} を共有`);
+      shareBtn.append(createSvgIcon("icon-share", 14), document.createTextNode("共有"));
+      shareBtn.addEventListener("click", async () => {
+        try {
+          await navigator.share({ files: [shareFile], title: name });
+        } catch {}
+      });
+      actions.append(shareBtn);
+    }
 
-  header.append(info, actions);
-  li.append(header);
+    const dlLink = document.createElement("a");
+    dlLink.href = url;
+    dlLink.download = name;
+    dlLink.className = "dl-btn";
+    dlLink.setAttribute("aria-label", `${name} を保存`);
+    dlLink.append(createSvgIcon("icon-download", 14), document.createTextNode("保存"));
+    actions.append(dlLink);
 
-  if (isImage) {
-    const img = document.createElement("img");
-    img.src = url;
-    img.className = "preview-img";
-    img.alt = name;
-    li.append(img);
+    header.append(info, actions);
+    li.append(header);
+
+    if (isImage) {
+      const img = document.createElement("img");
+      img.src = url;
+      img.className = "preview-img";
+      img.alt = name;
+      img.loading = "lazy";
+      li.append(img);
+    }
   }
 
   list.prepend(li);
