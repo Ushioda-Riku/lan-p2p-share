@@ -128,7 +128,6 @@
       to { transform: rotate(360deg); }
     }
 
-    /* Header */
     .app-header {
       position: sticky;
       top: 0;
@@ -215,7 +214,6 @@
       text-wrap: balance;
     }
 
-    /* Own Code Card */
     .code-row {
       display: flex;
       flex-direction: column;
@@ -315,7 +313,6 @@
       margin: 2px auto 0 auto;
     }
 
-    /* Connect Input */
     .connect-row {
       display: flex;
       gap: 8px;
@@ -404,7 +401,6 @@
       color: var(--red);
     }
 
-    /* Transfer View */
     .session-meta {
       display: flex;
       align-items: center;
@@ -528,6 +524,7 @@
       display: flex;
       justify-content: space-between;
       gap: 10px;
+      font-variant-numeric: tabular-nums;
     }
 
     .status-text span:first-child {
@@ -562,7 +559,6 @@
       transition: inline-size 0.15s ease;
     }
 
-    /* History */
     .file-list {
       list-style: none;
       padding: 0;
@@ -755,7 +751,7 @@
       <section class="card" aria-labelledby="sendHeading">
         <div class="card-head">
           <div class="session-meta">
-            <h2 id="sendHeading" class="sr-only" hidden>転送</h2>
+            <h2 id="sendHeading" hidden>転送</h2>
             <span id="peerIdLabel" class="peer-id-label">-----</span>
             <span id="modeChip" class="mode-chip" role="status">
               <svg id="modeChipIcon" class="svg-icon" width="13" height="13" aria-hidden="true"><use href="#icon-shield"></use></svg>
@@ -815,26 +811,33 @@ const MQTT_BROKERS = [
   "wss://test.mosquitto.org:8081"
 ];
 
-const P2P_CHUNK_SIZE = 16 * 1024;
-const P2P_ACK_INTERVAL = 16;
-const RELAY_CHUNK_SIZE = 24 * 1024;
-const RELAY_WINDOW = 6;
-const RELAY_PACE_MS = 8;
+const P2P_LANES = ["stripe-0", "stripe-1", "stripe-2"];
+const P2P_HIGH_WATER = 512 * 1024;
+const P2P_LOW_WATER = 64 * 1024;
+const RELAY_CHUNK_SIZE = 32 * 1024;
+const SLAB_SIZE = 1024 * 1024;
+const SACK_INTERVAL = 8;
+const COMPACT_CHUNK_BATCH = 128;
 
 const CONNECT_TIMEOUT_MS = 12000;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAYS = [600, 2000, 4500, 8000, 12000];
 
+const HAS_COMPRESSION_STREAMS = typeof CompressionStream === "function" && typeof DecompressionStream === "function";
+const ENTROPY_HIST = new Uint16Array(256);
+
 let myId = "";
 let peer = null;
-let dataConn = null;
-let mqttClient = null;
-let mqttBrokerIndex = 0;
-let mqttReady = false;
-let peerReady = false;
+let p2pLanes = new Map();
+
+const brokerSlots = [
+  { id: 0, brokerIdx: 0, client: null, ready: false, inflight: 0, cwnd: 24, inflightHi: 72, minRtt: 120, ewmaRtt: 120, lastCongestionAt: 0 },
+  { id: 1, brokerIdx: 1, client: null, ready: false, inflight: 0, cwnd: 24, inflightHi: 72, minRtt: 120, ewmaRtt: 120, lastCongestionAt: 0 }
+];
+let nextFailoverBrokerIdx = 2;
 let currentInboxTopic = "";
 
-let connState = "idle"; // "idle" | "connecting" | "connected" | "reconnecting" | "disconnected"
+let connState = "idle";
 let connectingTargetId = null;
 let pairedPeerId = null;
 let currentAttemptId = null;
@@ -853,33 +856,39 @@ let relayOutTopic = "";
 
 let myKeyPair = null;
 let myPubKeyB64 = "";
+let cryptoInitPromise = null;
 let sharedAesKey = null;
 
-let incomingFileInfo = null;
-let incomingChunks = [];
-let receivedSize = 0;
-let expectedSeq = 0;
-let incomingAckInterval = RELAY_WINDOW;
+const seenAttemptIds = new Set();
+const incomingTransfers = new Map();
+const txSlotMap = new Map();
+const outgoingTransfers = new Map();
+const earlyRelayChunks = [];
+let nextTxSlot = 1;
+let legacyRecvId = null;
 let p2pRecvChain = Promise.resolve();
-
+let relayCtrlChain = Promise.resolve();
 let sendQueue = Promise.resolve();
-let pendingAckWaiter = null;
 
 let copyTipTimer = null;
 let lastCopyMessage = "";
+let sendRafScheduled = false;
+let recvRafScheduled = false;
+let latestSendUi = null;
+let latestRecvUi = null;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-window.addEventListener("DOMContentLoaded", async () => {
+window.addEventListener("DOMContentLoaded", () => {
   const savedId = normalizeCode(sessionStorage.getItem(STORAGE_MY_ID));
   myId = savedId.length === 5 ? savedId : generateCode();
   sessionStorage.setItem(STORAGE_MY_ID, myId);
   renderMyCode(myId);
   setupUIEvents();
 
-  await initCrypto();
-  startMqttClient();
+  cryptoInitPromise = initCrypto();
+  startAllBrokers();
   initPeerJS();
 
   const urlParams = new URLSearchParams(window.location.search);
@@ -916,6 +925,12 @@ window.addEventListener("online", () => {
   }
 });
 
+function nowMs() {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -931,8 +946,31 @@ function normalizeCode(str) {
     .slice(0, 5);
 }
 
+function getReadyBrokers() {
+  return brokerSlots.filter((s) => s.ready && s.client && s.client.connected);
+}
+
+function hasAnyMqttReady() {
+  return brokerSlots.some((s) => s.ready && s.client && s.client.connected);
+}
+
+function getOpenP2PLanes() {
+  const open = [];
+  for (const conn of p2pLanes.values()) {
+    if (conn && conn.open) open.push(conn);
+  }
+  return open;
+}
+
+function hasOpenP2P() {
+  for (const conn of p2pLanes.values()) {
+    if (conn && conn.open) return true;
+  }
+  return false;
+}
+
 function hasLiveTransport() {
-  return Boolean((dataConn && dataConn.open) || (isRelayReady && mqttReady));
+  return hasOpenP2P() || (isRelayReady && hasAnyMqttReady());
 }
 
 function wakeTransports() {
@@ -942,10 +980,12 @@ function wakeTransports() {
     try { peer.reconnect(); } catch {}
   }
 
-  if (!mqttClient) {
-    startMqttClient();
-  } else if (!mqttClient.connected && !mqttReady) {
-    try { mqttClient.reconnect(); } catch {}
+  for (const slot of brokerSlots) {
+    if (!slot.client) {
+      startBrokerSlot(slot);
+    } else if (!slot.client.connected && !slot.ready) {
+      try { slot.client.reconnect(); } catch {}
+    }
   }
 }
 
@@ -978,7 +1018,7 @@ function updateReadyIndicator() {
     text.textContent = "再接続中";
     return;
   }
-  if (mqttReady || peerReady) {
+  if (hasAnyMqttReady() || peerReady) {
     pill.classList.add("is-ready");
     text.textContent = "待機中";
   } else {
@@ -1013,7 +1053,87 @@ function setConnectingUI(isConnecting) {
   cancelBtn.classList.toggle("hidden", !isConnecting);
 }
 
-// === Web Crypto (ECDH P-256 + AES-256-GCM) ===
+// === Information-Theoretic Pre-Scan & Adaptive Per-Chunk Deflate ===
+function isConstantChunk(bytes) {
+  const n = bytes.length;
+  if (n < 64) return false;
+  const b0 = bytes[0];
+  if (bytes[n - 1] !== b0 || bytes[n >>> 1] !== b0 || bytes[n >>> 2] !== b0 || bytes[(n * 3) >>> 2] !== b0) {
+    return false;
+  }
+  for (let i = 1; i < n; i++) {
+    if (bytes[i] !== b0) return false;
+  }
+  return true;
+}
+
+function estimateShannonEntropy(bytes) {
+  const n = bytes.length;
+  if (n === 0) return 8.0;
+  ENTROPY_HIST.fill(0);
+  const step = n > 2048 ? Math.floor(n / 2048) : 1;
+  let samples = 0;
+  for (let i = 0; i < n; i += step) {
+    ENTROPY_HIST[bytes[i]] += 1;
+    samples += 1;
+  }
+  let h = 0;
+  const invN = 1 / samples;
+  for (let i = 0; i < 256; i++) {
+    const c = ENTROPY_HIST[i];
+    if (c > 0) {
+      const p = c * invN;
+      h -= p * Math.log2(p);
+    }
+  }
+  return h;
+}
+
+async function runStreamTransform(bytes, ctor) {
+  const cs = new ctor("deflate-raw");
+  const writer = cs.writable.getWriter();
+  writer.write(bytes);
+  writer.close();
+  const reader = cs.readable.getReader();
+  const parts = [];
+  let total = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    total += value.byteLength;
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (let i = 0; i < parts.length; i++) {
+    out.set(parts[i], off);
+    off += parts[i].byteLength;
+  }
+  return out;
+}
+
+async function prepareOutgoingPayload(chunkBytes, canDeflate) {
+  if (isConstantChunk(chunkBytes)) {
+    const sparse = new Uint8Array(5);
+    sparse[0] = chunkBytes[0];
+    new DataView(sparse.buffer).setUint32(1, chunkBytes.length, false);
+    return { frameType: 0x04, body: sparse };
+  }
+  if (canDeflate && chunkBytes.length >= 512) {
+    const h = estimateShannonEntropy(chunkBytes);
+    if (h < 7.20) {
+      try {
+        const compressed = await runStreamTransform(chunkBytes, CompressionStream);
+        if (compressed.byteLength < chunkBytes.length * 0.92) {
+          return { frameType: 0x03, body: compressed };
+        }
+      } catch {}
+    }
+  }
+  return { frameType: 0x02, body: chunkBytes };
+}
+
+// === Web Crypto (ECDH P-256 + AES-256-GCM + TLS 1.3 Deterministic XOR-Nonce AEAD) ===
 function bytesToBase64(bytes) {
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
@@ -1039,6 +1159,7 @@ async function initCrypto() {
 }
 
 async function deriveAesKey(remotePubB64) {
+  await cryptoInitPromise;
   if (!crypto.subtle || !myKeyPair || !remotePubB64) return null;
   const remotePub = await crypto.subtle.importKey(
     "raw",
@@ -1056,76 +1177,123 @@ async function deriveAesKey(remotePubB64) {
   );
 }
 
-async function encryptPacket(plainUint8) {
+async function encryptControlPacket(plainUint8) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = new Uint8Array(
     await crypto.subtle.encrypt({ name: "AES-GCM", iv }, sharedAesKey, plainUint8)
   );
-  const packet = new Uint8Array(12 + encrypted.length);
-  packet.set(iv, 0);
-  packet.set(encrypted, 12);
+  const packet = new Uint8Array(1 + 12 + encrypted.length);
+  packet[0] = 0x01;
+  packet.set(iv, 1);
+  packet.set(encrypted, 13);
   return packet;
 }
 
-async function decryptPacket(rawPayload) {
-  const bytes = new Uint8Array(rawPayload.buffer, rawPayload.byteOffset, rawPayload.byteLength);
-  const iv = bytes.slice(0, 12);
-  const ciphertext = bytes.slice(12);
+async function decryptControlPacket(bytes) {
+  const iv = bytes.slice(1, 13);
+  const ciphertext = bytes.slice(13);
   const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, sharedAesKey, ciphertext);
   return new Uint8Array(plainBuf);
 }
 
-// === MQTT WSS Signaling & Encrypted Fallback Transport ===
-function mqttSubscribe(topic, opts = { qos: 1 }) {
+function deriveChunkNonce(salt, seq, attemptGen) {
+  const iv = new Uint8Array(salt);
+  iv[7] ^= (attemptGen & 0xff);
+  const view = new DataView(iv.buffer, iv.byteOffset, iv.byteLength);
+  view.setUint32(8, (view.getUint32(8, false) ^ seq) >>> 0, false);
+  return iv;
+}
+
+async function encryptChunkWithXorNonce(salt, frameType, seq, sentMs32, attemptGen, txSlot, bodyBytes) {
+  const header = new Uint8Array(11);
+  header[0] = frameType;
+  const hView = new DataView(header.buffer);
+  hView.setUint32(1, seq, false);
+  hView.setUint32(5, sentMs32 >>> 0, false);
+  header[9] = attemptGen & 0xff;
+  header[10] = txSlot & 0xff;
+
+  const iv = deriveChunkNonce(salt, seq, attemptGen);
+  const encrypted = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: header }, sharedAesKey, bodyBytes)
+  );
+  const packet = new Uint8Array(11 + encrypted.length);
+  packet.set(header, 0);
+  packet.set(encrypted, 11);
+  return packet;
+}
+
+async function decryptChunkWithXorNonce(salt, bytes) {
+  const header = bytes.subarray(0, 11);
+  const frameType = bytes[0];
+  const hView = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const seq = hView.getUint32(1, false);
+  const sentMs32 = hView.getUint32(5, false);
+  const attemptGen = bytes[9];
+  const txSlot = bytes[10];
+  const ciphertext = bytes.subarray(11);
+  const iv = deriveChunkNonce(salt, seq, attemptGen);
+  const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: header }, sharedAesKey, ciphertext);
+  return { frameType, seq, sentMs32, txSlot, body: new Uint8Array(plainBuf) };
+}
+
+// === Dual-Broker Simultaneous WSS Signaling & Multipath Relay ===
+function mqttSubscribeSlot(slot, topic, opts = { qos: 1 }) {
   return new Promise((resolve, reject) => {
-    if (!mqttClient) return reject(new Error("MQTT unavailable"));
-    mqttClient.subscribe(topic, opts, (err) => (err ? reject(err) : resolve()));
+    if (!slot.client) return reject(new Error("MQTT unavailable"));
+    slot.client.subscribe(topic, opts, (err) => (err ? reject(err) : resolve()));
   });
 }
 
-function mqttPublish(topic, payload, opts = { qos: 1 }) {
+function mqttPublishSlot(slot, topic, payload, opts = { qos: 1 }) {
   return new Promise((resolve, reject) => {
-    if (!mqttClient) return reject(new Error("MQTT unavailable"));
-    mqttClient.publish(topic, payload, opts, (err) => (err ? reject(err) : resolve()));
+    if (!slot.client || !slot.client.connected) return reject(new Error("MQTT offline"));
+    slot.client.publish(topic, payload, opts, (err) => (err ? reject(err) : resolve()));
   });
 }
 
-function startMqttClient() {
+function startAllBrokers() {
+  for (const slot of brokerSlots) {
+    startBrokerSlot(slot);
+  }
+}
+
+function startBrokerSlot(slot) {
   if (typeof mqtt === "undefined") return;
-  const brokerUrl = MQTT_BROKERS[mqttBrokerIndex % MQTT_BROKERS.length];
+  const brokerUrl = MQTT_BROKERS[slot.brokerIdx % MQTT_BROKERS.length];
   let settled = false;
 
   const client = mqtt.connect(brokerUrl, {
-    clientId: `airshare_${myId}_${Math.random().toString(16).slice(2, 8)}`,
+    clientId: `airshare_${myId}_${slot.id}_${Math.random().toString(16).slice(2, 7)}`,
     clean: true,
     connectTimeout: 4500,
     reconnectPeriod: 2000,
     keepalive: 25
   });
-  mqttClient = client;
+  slot.client = client;
 
   const failoverTimer = setTimeout(() => {
-    if (!settled) {
+    if (!settled && slot.client === client) {
       settled = true;
       try { client.end(true); } catch {}
-      mqttBrokerIndex += 1;
-      startMqttClient();
+      slot.brokerIdx = (nextFailoverBrokerIdx++) % MQTT_BROKERS.length;
+      startBrokerSlot(slot);
     }
   }, 5000);
 
   client.on("connect", async () => {
-    if (mqttClient !== client) return;
+    if (slot.client !== client) return;
     settled = true;
     clearTimeout(failoverTimer);
-    mqttReady = true;
+    slot.ready = true;
     updateReadyIndicator();
 
     const inbox = `lanp2p-v2/inbox/${myId}`;
     currentInboxTopic = inbox;
     try {
-      await mqttSubscribe(inbox, { qos: 1 });
+      await mqttSubscribeSlot(slot, inbox, { qos: 1 });
       if (relayInTopic) {
-        await mqttSubscribe(relayInTopic, { qos: 1 });
+        await mqttSubscribeSlot(slot, relayInTopic, { qos: 1 });
       }
       if (connectingTargetId && !isRelayReady) {
         sendMqttOffer("hello", connectingTargetId, currentAttemptId);
@@ -1139,8 +1307,7 @@ function startMqttClient() {
     if (topic === currentInboxTopic) {
       const bytes = new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength);
       try {
-        const msg = JSON.parse(textDecoder.decode(bytes));
-        handleInboxMessage(msg);
+        handleInboxMessage(JSON.parse(textDecoder.decode(bytes)));
       } catch {}
       return;
     }
@@ -1150,15 +1317,18 @@ function startMqttClient() {
   });
 
   const onDrop = () => {
-    if (mqttClient !== client) return;
-    mqttReady = false;
-    isRelayReady = false;
-    updateReadyIndicator();
-    if (pairedPeerId) {
-      if (dataConn && dataConn.open) {
-        updateTransferStatus();
-      } else if (connState === "connected") {
-        startAutoReconnect(false);
+    if (slot.client !== client) return;
+    slot.ready = false;
+    slot.inflight = 0;
+    if (!hasAnyMqttReady()) {
+      isRelayReady = false;
+      updateReadyIndicator();
+      if (pairedPeerId) {
+        if (hasOpenP2P()) {
+          updateTransferStatus();
+        } else if (connState === "connected") {
+          startAutoReconnect(false);
+        }
       }
     }
   };
@@ -1167,20 +1337,36 @@ function startMqttClient() {
   client.on("close", onDrop);
 
   client.on("error", () => {
-    if (!settled) {
+    if (!settled && slot.client === client) {
       settled = true;
       clearTimeout(failoverTimer);
       try { client.end(true); } catch {}
-      mqttBrokerIndex += 1;
-      startMqttClient();
+      slot.brokerIdx = (nextFailoverBrokerIdx++) % MQTT_BROKERS.length;
+      startBrokerSlot(slot);
     }
   });
 }
 
+async function subscribeAllBrokers(topic) {
+  const ready = getReadyBrokers();
+  await Promise.all(ready.map((s) => mqttSubscribeSlot(s, topic, { qos: 1 }).catch(() => {})));
+}
+
+async function publishOnBestBroker(topic, payload, opts = { qos: 1 }) {
+  const ready = getReadyBrokers();
+  if (ready.length === 0) throw new Error("No MQTT broker ready");
+  let best = ready[0];
+  for (let i = 1; i < ready.length; i++) {
+    if (ready[i].inflight < best.inflight) best = ready[i];
+  }
+  return mqttPublishSlot(best, topic, payload, opts);
+}
+
 async function sendMqttOffer(kind, targetId, attemptId) {
-  if (!mqttClient || !mqttReady || !myPubKeyB64 || !targetId || !attemptId) return;
+  await cryptoInitPromise;
+  if (!hasAnyMqttReady() || !myPubKeyB64 || !targetId || !attemptId) return;
   try {
-    await mqttPublish(
+    await publishOnBestBroker(
       `lanp2p-v2/inbox/${targetId}`,
       JSON.stringify({ kind, from: myId, pubKey: myPubKeyB64, attemptId }),
       { qos: 1 }
@@ -1192,28 +1378,32 @@ async function handleInboxMessage(msg) {
   if (!msg || !msg.kind || !msg.from) return;
 
   if (msg.kind === "hello" || msg.kind === "reconnect") {
+    const dedupKey = `${msg.kind}:${msg.from}:${msg.attemptId}`;
+    if (seenAttemptIds.has(dedupKey)) return;
     const activeTarget = connectingTargetId || pairedPeerId;
     if (pairedPeerId && pairedPeerId !== msg.from) {
-      await mqttPublish(`lanp2p-v2/inbox/${msg.from}`, JSON.stringify({ kind: "busy", from: myId }), { qos: 1 }).catch(() => {});
+      publishOnBestBroker(`lanp2p-v2/inbox/${msg.from}`, JSON.stringify({ kind: "busy", from: myId }), { qos: 1 }).catch(() => {});
       return;
     }
     if ((connState === "connecting" || connState === "reconnecting") && activeTarget === msg.from && currentAttemptId) {
-      if (myId > msg.from) {
-        return; // impolite peer keeps own attemptId
-      }
+      if (myId > msg.from) return;
     }
+    seenAttemptIds.add(dedupKey);
     try {
+      await cryptoInitPromise;
       sharedAesKey = await deriveAesKey(msg.pubKey);
       const nextIn = `lanp2p-v2/stream/${msg.attemptId}/from-${msg.from}`;
       const nextOut = `lanp2p-v2/stream/${msg.attemptId}/from-${myId}`;
-      if (relayInTopic && relayInTopic !== nextIn && mqttClient) {
-        try { mqttClient.unsubscribe(relayInTopic); } catch {}
+      if (relayInTopic && relayInTopic !== nextIn) {
+        for (const s of brokerSlots) {
+          if (s.client) { try { s.client.unsubscribe(relayInTopic); } catch {} }
+        }
       }
       relayInTopic = nextIn;
       relayOutTopic = nextOut;
       currentAttemptId = msg.attemptId;
-      await mqttSubscribe(relayInTopic, { qos: 1 });
-      await mqttPublish(
+      await subscribeAllBrokers(relayInTopic);
+      await publishOnBestBroker(
         `lanp2p-v2/inbox/${msg.from}`,
         JSON.stringify({ kind: "hello-ack", from: myId, pubKey: myPubKeyB64, attemptId: msg.attemptId }),
         { qos: 1 }
@@ -1223,17 +1413,21 @@ async function handleInboxMessage(msg) {
     } catch {}
   } else if (msg.kind === "hello-ack") {
     const expectedPeer = connectingTargetId || pairedPeerId;
-    if (msg.attemptId !== currentAttemptId || msg.from !== expectedPeer) return;
+    const ackKey = `ack:${msg.from}:${msg.attemptId}`;
+    if (msg.attemptId !== currentAttemptId || msg.from !== expectedPeer || seenAttemptIds.has(ackKey)) return;
+    seenAttemptIds.add(ackKey);
     try {
       sharedAesKey = await deriveAesKey(msg.pubKey);
       const nextIn = `lanp2p-v2/stream/${msg.attemptId}/from-${msg.from}`;
       const nextOut = `lanp2p-v2/stream/${msg.attemptId}/from-${myId}`;
-      if (relayInTopic && relayInTopic !== nextIn && mqttClient) {
-        try { mqttClient.unsubscribe(relayInTopic); } catch {}
+      if (relayInTopic && relayInTopic !== nextIn) {
+        for (const s of brokerSlots) {
+          if (s.client) { try { s.client.unsubscribe(relayInTopic); } catch {} }
+        }
       }
       relayInTopic = nextIn;
       relayOutTopic = nextOut;
-      await mqttSubscribe(relayInTopic, { qos: 1 });
+      await subscribeAllBrokers(relayInTopic);
       isRelayReady = true;
       enterConnectedState(msg.from, "relay");
     } catch {}
@@ -1248,7 +1442,7 @@ async function handleInboxMessage(msg) {
   }
 }
 
-// === WebRTC PeerJS (Fast Direct P2P with Raw Framing) ===
+// === 3-Association Parallel WebRTC Raw Striping ===
 function initPeerJS() {
   if (typeof Peer === "undefined") return;
   peer = new Peer(PEER_PREFIX + myId, {
@@ -1265,7 +1459,7 @@ function initPeerJS() {
     peerReady = true;
     updateReadyIndicator();
     const target = connectingTargetId || pairedPeerId;
-    if (target && (!dataConn || !dataConn.open)) {
+    if (target && !hasOpenP2P()) {
       firePeerConnect(target);
     }
   });
@@ -1281,17 +1475,21 @@ function initPeerJS() {
       myId = generateCode();
       sessionStorage.setItem(STORAGE_MY_ID, myId);
       renderMyCode(myId);
-      if (mqttClient && mqttReady) {
+      if (hasAnyMqttReady()) {
         const oldInbox = currentInboxTopic;
         currentInboxTopic = `lanp2p-v2/inbox/${myId}`;
-        if (oldInbox) mqttClient.unsubscribe(oldInbox);
-        mqttSubscribe(currentInboxTopic, { qos: 1 }).catch(() => {});
+        if (oldInbox) {
+          for (const s of brokerSlots) {
+            if (s.client) { try { s.client.unsubscribe(oldInbox); } catch {} }
+          }
+        }
+        subscribeAllBrokers(currentInboxTopic).catch(() => {});
       }
       initPeerJS();
       return;
     }
     if (err.type === "peer-unavailable") {
-      if (!mqttReady && !isRelayReady && connState === "connecting") {
+      if (!hasAnyMqttReady() && !isRelayReady && connState === "connecting") {
         cancelPendingConnection("相手が見つかりませんでした", true);
       }
     }
@@ -1300,31 +1498,40 @@ function initPeerJS() {
 
 function firePeerConnect(targetId) {
   if (!peer || !peerReady || !targetId) return;
-  try {
-    const conn = peer.connect(PEER_PREFIX + targetId, { reliable: true, serialization: "raw" });
-    attachWebRtcConn(conn);
-  } catch {}
+  for (const label of P2P_LANES) {
+    const existing = p2pLanes.get(label);
+    if (existing && (existing.open || existing.peerConnection?.iceConnectionState === "checking")) continue;
+    try {
+      const conn = peer.connect(PEER_PREFIX + targetId, { reliable: true, serialization: "raw", label });
+      attachWebRtcConn(conn);
+    } catch {}
+  }
 }
 
 function attachWebRtcConn(conn) {
   const remoteId = conn.peer.replace(PEER_PREFIX, "");
+  const laneKey = conn.label || "stripe-0";
   if (pairedPeerId && pairedPeerId !== remoteId) {
     conn.close();
     return;
   }
-  if (dataConn && dataConn.open && dataConn !== conn) {
+  const prev = p2pLanes.get(laneKey);
+  if (prev && prev.open && prev !== conn) {
     conn.close();
     return;
   }
-  dataConn = conn;
-  if (conn.dataChannel) {
-    conn.dataChannel.binaryType = "arraybuffer";
-  }
+  p2pLanes.set(laneKey, conn);
 
-  const onOpen = () => {
+  const configureDc = () => {
     if (conn.dataChannel) {
       conn.dataChannel.binaryType = "arraybuffer";
+      conn.dataChannel.bufferedAmountLowThreshold = P2P_LOW_WATER;
     }
+  };
+  configureDc();
+
+  const onOpen = () => {
+    configureDc();
     isDirectP2P = true;
     clearSilentP2PRetry();
     enterConnectedState(remoteId, "p2p");
@@ -1337,38 +1544,41 @@ function attachWebRtcConn(conn) {
   }
 
   conn.on("data", (raw) => {
-    p2pRecvChain = p2pRecvChain
-      .then(async () => {
-        let bytes;
-        if (raw instanceof ArrayBuffer) bytes = new Uint8Array(raw);
-        else if (ArrayBuffer.isView(raw)) bytes = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
-        else if (raw instanceof Blob) bytes = new Uint8Array(await raw.arrayBuffer());
-        else return;
-        handleFramePacket(bytes, "p2p");
-      })
-      .catch((err) => console.error("P2P recv error:", err));
+    if (raw instanceof ArrayBuffer) {
+      handleP2PRawPacket(new Uint8Array(raw));
+      return;
+    }
+    if (ArrayBuffer.isView(raw)) {
+      handleP2PRawPacket(new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength));
+      return;
+    }
+    if (raw instanceof Blob) {
+      p2pRecvChain = p2pRecvChain
+        .then(async () => handleP2PRawPacket(new Uint8Array(await raw.arrayBuffer())))
+        .catch((err) => console.error("P2P recv error:", err));
+    }
   });
 
   if (conn.peerConnection) {
     conn.peerConnection.addEventListener("iceconnectionstatechange", () => {
       const state = conn.peerConnection.iceConnectionState;
-      if ((state === "disconnected" || state === "failed") && dataConn === conn) {
-        handleWebRtcDrop(conn);
+      if ((state === "disconnected" || state === "failed") && p2pLanes.get(laneKey) === conn) {
+        handleWebRtcDrop(laneKey, conn);
       }
     });
   }
 
-  conn.on("close", () => handleWebRtcDrop(conn));
-  conn.on("error", () => handleWebRtcDrop(conn));
+  conn.on("close", () => handleWebRtcDrop(laneKey, conn));
+  conn.on("error", () => handleWebRtcDrop(laneKey, conn));
 }
 
-function handleWebRtcDrop(conn) {
-  if (dataConn !== conn) return;
-  dataConn = null;
-  isDirectP2P = false;
-  if (!pairedPeerId) return;
+function handleWebRtcDrop(laneKey, conn) {
+  if (p2pLanes.get(laneKey) !== conn) return;
+  p2pLanes.delete(laneKey);
+  isDirectP2P = hasOpenP2P();
+  if (!pairedPeerId || isDirectP2P) return;
 
-  if (isRelayReady && mqttReady) {
+  if (isRelayReady && hasAnyMqttReady()) {
     updateTransferStatus();
     scheduleSilentP2PRetry();
   } else {
@@ -1386,7 +1596,7 @@ function clearSilentP2PRetry() {
 function scheduleSilentP2PRetry() {
   clearSilentP2PRetry();
   silentP2PRetryTimer = setTimeout(() => {
-    if (pairedPeerId && (!dataConn || !dataConn.open) && peerReady) {
+    if (pairedPeerId && !hasOpenP2P() && peerReady) {
       firePeerConnect(pairedPeerId);
     }
   }, 4000);
@@ -1426,7 +1636,7 @@ function connectToPeer(rawTargetId) {
   setConnStatus(`${targetId} に接続しています`);
   updateReadyIndicator();
 
-  if (mqttReady) sendMqttOffer("hello", targetId, currentAttemptId);
+  if (hasAnyMqttReady()) sendMqttOffer("hello", targetId, currentAttemptId);
   if (peerReady) firePeerConnect(targetId);
 
   retryHelloTimers.push(
@@ -1454,10 +1664,12 @@ function cancelPendingConnection(statusText = "", isError = false) {
   connState = "idle";
   connectingTargetId = null;
   currentAttemptId = null;
-  if (dataConn && !dataConn.open) {
-    try { dataConn.close(); } catch {}
-    dataConn = null;
+  for (const conn of p2pLanes.values()) {
+    if (!conn.open) {
+      try { conn.close(); } catch {}
+    }
   }
+  p2pLanes.clear();
   setConnectingUI(false);
   setConnStatus(statusText, isError);
   updateReadyIndicator();
@@ -1466,7 +1678,7 @@ function cancelPendingConnection(statusText = "", isError = false) {
 function startAutoReconnect(resetBackoff = false) {
   if (!pairedPeerId) return;
   if (hasLiveTransport()) {
-    enterConnectedState(pairedPeerId, isDirectP2P ? "p2p" : "relay");
+    enterConnectedState(pairedPeerId, hasOpenP2P() ? "p2p" : "relay");
     return;
   }
   if (connState === "reconnecting" && !resetBackoff) return;
@@ -1493,7 +1705,7 @@ function startAutoReconnect(resetBackoff = false) {
       if (!pairedPeerId || hasLiveTransport()) return;
       wakeTransports();
       currentAttemptId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      if (mqttReady) sendMqttOffer("reconnect", pairedPeerId, currentAttemptId);
+      if (hasAnyMqttReady()) sendMqttOffer("reconnect", pairedPeerId, currentAttemptId);
       if (peerReady) firePeerConnect(pairedPeerId);
 
       reconnectTimer = setTimeout(scheduleNext, 3500);
@@ -1544,6 +1756,10 @@ function enterConnectedState(remoteId, mode) {
 
   while (connectedWaiters.length > 0) {
     connectedWaiters.shift().resolve();
+  }
+
+  for (const tx of outgoingTransfers.values()) {
+    if (tx.onTransportRecovered) tx.onTransportRecovered();
   }
 
   if (window.location.search) {
@@ -1604,29 +1820,31 @@ function resetToConnectPanel(statusMsg = "") {
 
   sessionStorage.removeItem(STORAGE_PAIRED_PEER);
 
-  if (relayInTopic && mqttClient) {
-    try { mqttClient.unsubscribe(relayInTopic); } catch {}
+  if (relayInTopic) {
+    for (const s of brokerSlots) {
+      if (s.client) { try { s.client.unsubscribe(relayInTopic); } catch {} }
+    }
   }
   relayInTopic = "";
   relayOutTopic = "";
 
-  if (dataConn) {
-    try { dataConn.close(); } catch {}
-    dataConn = null;
+  for (const conn of p2pLanes.values()) {
+    try { conn.close(); } catch {}
   }
+  p2pLanes.clear();
 
-  if (pendingAckWaiter) {
-    pendingAckWaiter.reject(new Error("Disconnected"));
-    pendingAckWaiter = null;
+  for (const tx of outgoingTransfers.values()) {
+    tx.abort(new Error("Disconnected"));
   }
+  outgoingTransfers.clear();
+  incomingTransfers.clear();
+  txSlotMap.clear();
+  earlyRelayChunks.length = 0;
+  legacyRecvId = null;
+
   while (connectedWaiters.length > 0) {
     connectedWaiters.shift().reject(new Error("Disconnected"));
   }
-
-  incomingFileInfo = null;
-  incomingChunks = [];
-  receivedSize = 0;
-  expectedSeq = 0;
 
   document.getElementById("sendProgressBox").style.display = "none";
   document.getElementById("recvProgressBox").style.display = "none";
@@ -1637,7 +1855,104 @@ function resetToConnectPanel(statusMsg = "") {
   updateReadyIndicator();
 }
 
-// === Framed File Sending (Raw P2P + Windowed Paced E2EE Relay) ===
+// === rAF Progress UI Coalescing ===
+function scheduleSendUi(name, bytesDone, totalBytes, startedAt) {
+  latestSendUi = { name, bytesDone, totalBytes, startedAt };
+  if (sendRafScheduled) return;
+  sendRafScheduled = true;
+  requestAnimationFrame(() => {
+    sendRafScheduled = false;
+    if (!latestSendUi) return;
+    const { name: n, bytesDone: d, totalBytes: t, startedAt: s } = latestSendUi;
+    const pct = t > 0 ? Math.min(100, Math.round((d / t) * 100)) : 100;
+    const elapsedSec = Math.max(0.05, (nowMs() - s) / 1000);
+    const mbps = (d / (1024 * 1024)) / elapsedSec;
+    document.getElementById("sendFileName").textContent = n;
+    document.getElementById("sendProgress").value = pct;
+    document.getElementById("sendPercent").textContent = `${pct}% · ${mbps.toFixed(1)} MB/s`;
+  });
+}
+
+function scheduleRecvUi(name, bytesDone, totalBytes, startedAt) {
+  latestRecvUi = { name, bytesDone, totalBytes, startedAt };
+  if (recvRafScheduled) return;
+  recvRafScheduled = true;
+  requestAnimationFrame(() => {
+    recvRafScheduled = false;
+    if (!latestRecvUi) return;
+    const { name: n, bytesDone: d, totalBytes: t, startedAt: s } = latestRecvUi;
+    const pct = t > 0 ? Math.min(100, Math.round((d / t) * 100)) : 100;
+    const elapsedSec = Math.max(0.05, (nowMs() - s) / 1000);
+    const mbps = (d / (1024 * 1024)) / elapsedSec;
+    document.getElementById("recvFileName").textContent = n;
+    document.getElementById("recvProgress").value = pct;
+    document.getElementById("recvPercent").textContent = `${pct}% · ${mbps.toFixed(1)} MB/s`;
+  });
+}
+
+// === 1 MB Async Slab Read-Ahead with Synchronous Cache Hit ===
+function createSlabReader(file, chunkSize) {
+  const slabChunks = Math.max(1, Math.floor(SLAB_SIZE / chunkSize));
+  const slabBytes = slabChunks * chunkSize;
+  const promiseCache = new Map();
+  const resolvedCache = new Map();
+  let nextPrefetchIdx = -1;
+
+  function loadSlab(slabIdx) {
+    if (promiseCache.has(slabIdx)) return promiseCache.get(slabIdx);
+    const start = slabIdx * slabBytes;
+    if (start >= file.size) return null;
+    const end = Math.min(file.size, start + slabBytes);
+    const p = file.slice(start, end).arrayBuffer().then((ab) => {
+      const u8 = new Uint8Array(ab);
+      resolvedCache.set(slabIdx, u8);
+      return u8;
+    });
+    promiseCache.set(slabIdx, p);
+    return p;
+  }
+
+  function prefetchNext(slabIdx) {
+    if (slabIdx + 1 > nextPrefetchIdx) {
+      nextPrefetchIdx = slabIdx + 1;
+      loadSlab(nextPrefetchIdx);
+    }
+    for (const k of promiseCache.keys()) {
+      if (k < slabIdx - 1) {
+        promiseCache.delete(k);
+        resolvedCache.delete(k);
+      }
+    }
+  }
+
+  return {
+    getChunkSync(seq) {
+      const start = seq * chunkSize;
+      if (start >= file.size) return new Uint8Array(0);
+      const slabIdx = Math.floor(start / slabBytes);
+      const slab = resolvedCache.get(slabIdx);
+      if (!slab) return null;
+      prefetchNext(slabIdx);
+      const inSlabOffset = start - slabIdx * slabBytes;
+      const len = Math.min(chunkSize, file.size - start);
+      return slab.subarray(inSlabOffset, inSlabOffset + len);
+    },
+    async getChunk(seq) {
+      const sync = this.getChunkSync(seq);
+      if (sync) return sync;
+      const start = seq * chunkSize;
+      if (start >= file.size) return new Uint8Array(0);
+      const slabIdx = Math.floor(start / slabBytes);
+      const slab = await loadSlab(slabIdx);
+      prefetchNext(slabIdx);
+      const inSlabOffset = start - slabIdx * slabBytes;
+      const len = Math.min(chunkSize, file.size - start);
+      return slab.subarray(inSlabOffset, inSlabOffset + len);
+    }
+  };
+}
+
+// === Multipath ECF Scheduler, Tail Cloning, Mid-File P2P Cutover & Resume ===
 function buildControlFrame(obj) {
   const jsonBytes = textEncoder.encode(JSON.stringify(obj));
   const frame = new Uint8Array(1 + jsonBytes.length);
@@ -1646,12 +1961,78 @@ function buildControlFrame(obj) {
   return frame;
 }
 
-function buildChunkFrame(seq, chunkBytes) {
-  const frame = new Uint8Array(1 + 4 + chunkBytes.length);
-  frame[0] = 0x02;
-  new DataView(frame.buffer).setUint32(1, seq, false);
-  frame.set(chunkBytes, 5);
+function buildP2PChunkFrame(frameType, seq, bodyBytes, sentMs32, attemptGen, txSlot) {
+  const frame = new Uint8Array(11 + bodyBytes.length);
+  frame[0] = frameType;
+  const view = new DataView(frame.buffer);
+  view.setUint32(1, seq, false);
+  view.setUint32(5, sentMs32 >>> 0, false);
+  frame[9] = attemptGen & 0xff;
+  frame[10] = txSlot & 0xff;
+  frame.set(bodyBytes, 11);
   return frame;
+}
+
+function sendControlMessage(obj, preferP2P = true) {
+  const frame = buildControlFrame(obj);
+  if (preferP2P && hasOpenP2P()) {
+    const lane = pickLowestBufferedP2PLane();
+    if (lane) {
+      try {
+        lane.send(frame);
+        return Promise.resolve();
+      } catch {}
+    }
+  }
+  if (isRelayReady && hasAnyMqttReady()) {
+    return encryptControlPacket(frame)
+      .then((pkt) => publishOnBestBroker(relayOutTopic, pkt, { qos: 1 }))
+      .catch(() => {});
+  }
+  return Promise.resolve();
+}
+
+function pickLowestBufferedP2PLane() {
+  let best = null;
+  let bestBuf = Infinity;
+  for (const conn of p2pLanes.values()) {
+    if (!conn || !conn.open) continue;
+    const b = conn.dataChannel ? conn.dataChannel.bufferedAmount : 0;
+    if (b < bestBuf) {
+      bestBuf = b;
+      best = conn;
+    }
+  }
+  return best;
+}
+
+function waitForAnyP2PLaneLow() {
+  const lanes = getOpenP2PLanes();
+  if (lanes.length === 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    let done = false;
+    const cleanups = [];
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      for (const fn of cleanups) fn();
+      resolve();
+    };
+    const timer = setTimeout(finish, 40);
+    for (const conn of lanes) {
+      const dc = conn.dataChannel;
+      if (!dc) continue;
+      if (dc.bufferedAmount < P2P_HIGH_WATER) {
+        finish();
+        return;
+      }
+      if (typeof dc.addEventListener === "function") {
+        dc.addEventListener("bufferedamountlow", finish);
+        cleanups.push(() => dc.removeEventListener && dc.removeEventListener("bufferedamountlow", finish));
+      }
+    }
+  });
 }
 
 function sendFiles(files, onAfterDone) {
@@ -1670,246 +2051,629 @@ function sendFiles(files, onAfterDone) {
 
 async function processSendQueue(files) {
   const progressBox = document.getElementById("sendProgressBox");
-  const progressBar = document.getElementById("sendProgress");
-  const fileNameEl = document.getElementById("sendFileName");
-  const percentEl = document.getElementById("sendPercent");
-
   progressBox.style.display = "block";
 
   for (let idx = 0; idx < files.length; idx++) {
     const file = files[idx];
     await ensureConnected(10000);
 
-    fileNameEl.textContent = file.name;
-    progressBar.value = 0;
-    percentEl.textContent = "0%";
-
-    if (dataConn && dataConn.open) {
-      await sendFileViaP2P(file, progressBar, percentEl);
-    } else {
-      await sendFileViaRelay(file, progressBar, percentEl);
-    }
-
+    const startedAt = nowMs();
+    scheduleSendUi(file.name, 0, file.size, startedAt);
+    await sendFileUnified(file, startedAt);
     addFileToList(file.name, file.size, file.type, file, "送信");
-    if (idx < files.length - 1) {
-      await sleep(50);
-    }
   }
 
   setTimeout(() => { progressBox.style.display = "none"; }, 1400);
 }
 
-function waitForChunkAck(transferId, seq, timeoutMs = 5000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      if (pendingAckWaiter && pendingAckWaiter.transferId === transferId) {
-        pendingAckWaiter = null;
-      }
-      reject(new Error("ACK timeout"));
-    }, timeoutMs);
-
-    pendingAckWaiter = {
-      transferId,
-      seq,
-      resolve: () => { clearTimeout(timer); pendingAckWaiter = null; resolve(); },
-      reject: (err) => { clearTimeout(timer); pendingAckWaiter = null; reject(err); }
-    };
-  });
-}
-
-async function sendFileViaP2P(file, progressBar, percentEl) {
-  const transferId = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
-  dataConn.send(buildControlFrame({
-    type: "file-start",
-    transferId,
-    name: file.name,
-    size: file.size,
-    mime: file.type || "application/octet-stream"
-  }));
-
-  let offset = 0;
-  let seq = 0;
-  const dc = dataConn.dataChannel;
-
-  while (offset < file.size) {
-    if (!dataConn || !dataConn.open) {
-      throw new Error("P2P closed");
-    }
-    while ((dc && dc.bufferedAmount > 256 * 1024) || dataConn.bufferSize > 0) {
-      if (!dataConn || !dataConn.open) throw new Error("P2P closed");
-      await sleep(15);
-    }
-
-    const slice = file.slice(offset, offset + P2P_CHUNK_SIZE);
-    const chunkBytes = new Uint8Array(await slice.arrayBuffer());
-    dataConn.send(buildChunkFrame(seq, chunkBytes));
-
-    offset += chunkBytes.length;
-    const percent = file.size > 0 ? Math.min(100, Math.round((offset / file.size) * 100)) : 100;
-    progressBar.value = percent;
-    percentEl.textContent = `${percent}%`;
-
-    if ((seq + 1) % P2P_ACK_INTERVAL === 0 || offset >= file.size) {
-      await waitForChunkAck(transferId, seq, 10000);
-    }
-    seq += 1;
+function getNegotiatedP2PChunkSize() {
+  let minMaxMsg = 65536;
+  for (const conn of getOpenP2PLanes()) {
+    const m = conn.peerConnection?.sctp?.maxMessageSize;
+    if (typeof m === "number" && m > 0) minMaxMsg = Math.min(minMaxMsg, m);
   }
-
-  dataConn.send(buildControlFrame({ type: "file-end", transferId }));
-  progressBar.value = 100;
-  percentEl.textContent = "100%";
+  return minMaxMsg >= 65536 ? 63 * 1024 : 16 * 1024;
 }
 
-async function sendRelayControl(obj) {
-  const frame = buildControlFrame(obj);
-  const packet = await encryptPacket(frame);
-  await mqttPublish(relayOutTopic, packet, { qos: 1 });
+function pickEcfBrokerSlot(excludeSlotId = -1) {
+  const ready = getReadyBrokers();
+  let best = null;
+  let bestScore = Infinity;
+  for (const slot of ready) {
+    if (slot.id === excludeSlotId) continue;
+    if (slot.inflight >= slot.cwnd) continue;
+    const score = ((slot.inflight + 1) * slot.ewmaRtt) / Math.max(1, slot.cwnd);
+    if (score < bestScore) {
+      bestScore = score;
+      best = slot;
+    }
+  }
+  return best;
 }
 
-async function sendFileViaRelay(file, progressBar, percentEl) {
+async function sendFileUnified(file, startedAt) {
   const transferId = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
-  await ensureConnected(10000);
-  await sendRelayControl({
-    type: "file-start",
+  const txSlot = (nextTxSlot++) & 0xff;
+  const startedOnP2P = hasOpenP2P();
+  const chunkSize = startedOnP2P ? getNegotiatedP2PChunkSize() : RELAY_CHUNK_SIZE;
+  const totalChunks = file.size === 0 ? 0 : Math.ceil(file.size / chunkSize);
+  const salt = crypto.getRandomValues(new Uint8Array(12));
+  const localSlotInflight = new Int32Array(brokerSlots.length);
+
+  const txState = {
     transferId,
-    name: file.name,
-    size: file.size,
-    mime: file.type || "application/octet-stream"
+    txSlot,
+    salt,
+    cumSeq: -1,
+    highestSacked: -1,
+    acked: new Uint8Array(totalChunks),
+    sentAt: new Float64Array(totalChunks),
+    sentSlot: new Int8Array(totalChunks).fill(-1),
+    txCount: new Uint8Array(totalChunks),
+    tailCloned: new Uint8Array(totalChunks),
+    wake: null,
+    donePromise: null,
+    resolveDone: null,
+    rejectDone: null,
+    abort(err) { if (this.rejectDone) this.rejectDone(err); },
+    onTransportRecovered() {
+      if (totalChunks > 0 && this.cumSeq < totalChunks - 1) {
+        sendControlMessage({ type: "resume-query", transferId }, hasOpenP2P()).catch(() => {});
+      }
+      if (this.wake) {
+        const fn = this.wake;
+        this.wake = null;
+        fn();
+      }
+    },
+    onSack(msg) {
+      const now = nowMs();
+      const cum = Math.min(totalChunks - 1, msg.cumSeq);
+
+      const creditSlot = (seq, rttSample) => {
+        const sid = this.sentSlot[seq];
+        if (sid >= 0 && sid < brokerSlots.length) {
+          const slot = brokerSlots[sid];
+          if (localSlotInflight[sid] > 0) {
+            localSlotInflight[sid] -= 1;
+            slot.inflight = Math.max(0, slot.inflight - 1);
+          }
+          if (rttSample >= 1 && rttSample < 15000) {
+            slot.minRtt = Math.min(slot.minRtt, rttSample);
+            slot.ewmaRtt = slot.ewmaRtt * 0.8 + rttSample * 0.2;
+            if (rttSample > slot.minRtt * 1.45 + 25 && now - slot.lastCongestionAt > slot.minRtt) {
+              slot.lastCongestionAt = now;
+              slot.inflightHi = Math.max(12, Math.floor(slot.cwnd * 0.85));
+              slot.cwnd = Math.max(12, Math.min(slot.cwnd, slot.inflightHi));
+            } else {
+              slot.cwnd = Math.min(slot.inflightHi, slot.cwnd + 1);
+            }
+          } else {
+            slot.cwnd = Math.min(slot.inflightHi, slot.cwnd + 1);
+          }
+        }
+      };
+
+      const rttSample = typeof msg.echoTs === "number" && msg.echoTs > 0
+        ? ((Math.floor(now) - msg.echoTs) >>> 0)
+        : 0;
+
+      if (cum > this.cumSeq) {
+        for (let s = this.cumSeq + 1; s <= cum; s++) {
+          if (!this.acked[s]) {
+            this.acked[s] = 1;
+            creditSlot(s, rttSample);
+          }
+        }
+        this.cumSeq = cum;
+        this.highestSacked = Math.max(this.highestSacked, cum);
+      }
+
+      const hi = msg.bitmapHi >>> 0;
+      const lo = msg.bitmapLo >>> 0;
+      for (let bit = 0; bit < 64; bit++) {
+        const seq = this.cumSeq + 1 + bit;
+        if (seq >= totalChunks) break;
+        const isSet = bit < 32 ? ((lo >>> bit) & 1) : ((hi >>> (bit - 32)) & 1);
+        if (isSet && !this.acked[seq]) {
+          this.acked[seq] = 1;
+          creditSlot(seq, rttSample);
+          if (seq > this.highestSacked) this.highestSacked = seq;
+        }
+      }
+
+      if (this.cumSeq >= totalChunks - 1) {
+        this.resolveDone();
+      }
+      if (this.wake) {
+        const fn = this.wake;
+        this.wake = null;
+        fn();
+      }
+    }
+  };
+  txState.donePromise = new Promise((res, rej) => {
+    txState.resolveDone = res;
+    txState.rejectDone = rej;
   });
+  outgoingTransfers.set(transferId, txState);
 
-  let winStartOffset = 0;
-  let winStartSeq = 0;
+  try {
+    await ensureConnected(10000);
+    const fileStartPromise = sendControlMessage({
+      type: "file-start",
+      transferId,
+      txSlot,
+      name: file.name,
+      size: file.size,
+      mime: file.type || "application/octet-stream",
+      chunkSize,
+      totalChunks,
+      saltB64: bytesToBase64(salt),
+      deflateCapable: HAS_COMPRESSION_STREAMS
+    }, startedOnP2P);
+    if (startedOnP2P || totalChunks === 0) {
+      await fileStartPromise;
+    } else {
+      await sleep(2);
+    }
 
-  while (winStartOffset < file.size) {
-    let winEndOffset = winStartOffset;
-    let winEndSeq = winStartSeq;
+    if (totalChunks > 0) {
+      const reader = createSlabReader(file, chunkSize);
+      const retransmitSet = new Set();
+      let nextSeq = 0;
 
-    for (let attempt = 0; attempt < 4; attempt++) {
-      try {
-        await ensureConnected(10000);
-        let offset = winStartOffset;
-        let seq = winStartSeq;
-
-        for (let i = 0; i < RELAY_WINDOW && offset < file.size; i++) {
-          const slice = file.slice(offset, offset + RELAY_CHUNK_SIZE);
-          const chunkBytes = new Uint8Array(await slice.arrayBuffer());
-          const packet = await encryptPacket(buildChunkFrame(seq, chunkBytes));
-
-          await mqttPublish(relayOutTopic, packet, { qos: 0 });
-          offset += chunkBytes.length;
-          winEndOffset = offset;
-          winEndSeq = seq;
-
-          const percent = file.size > 0 ? Math.min(100, Math.round((offset / file.size) * 100)) : 100;
-          progressBar.value = percent;
-          percentEl.textContent = `${percent}%`;
-
-          seq += 1;
-          await sleep(RELAY_PACE_MS);
+      while (txState.cumSeq < totalChunks - 1) {
+        if (!hasLiveTransport()) {
+          await ensureConnected(15000);
         }
 
-        await waitForChunkAck(transferId, winEndSeq, 5000);
-        winStartOffset = winEndOffset;
-        winStartSeq = winEndSeq + 1;
-        break;
-      } catch (err) {
-        if (attempt === 3) throw err;
-        await sleep(300);
+        // Seamless mid-file P2P cutover OR primary P2P 3-lane streaming
+        if (hasOpenP2P()) {
+          while (retransmitSet.size > 0 || nextSeq < totalChunks) {
+            let lane = pickLowestBufferedP2PLane();
+            while (!lane || (lane.dataChannel && lane.dataChannel.bufferedAmount >= P2P_HIGH_WATER)) {
+              if (!hasOpenP2P()) break;
+              await waitForAnyP2PLaneLow();
+              lane = pickLowestBufferedP2PLane();
+            }
+            if (!lane || !lane.open) break;
+
+            let seqToSend;
+            if (retransmitSet.size > 0) {
+              seqToSend = retransmitSet.values().next().value;
+              retransmitSet.delete(seqToSend);
+            } else {
+              while (nextSeq < totalChunks && txState.acked[nextSeq]) nextSeq++;
+              if (nextSeq >= totalChunks) break;
+              seqToSend = nextSeq++;
+            }
+
+            let chunkBytes = reader.getChunkSync(seqToSend);
+            if (!chunkBytes) chunkBytes = await reader.getChunk(seqToSend);
+            const { frameType, body } = await prepareOutgoingPayload(chunkBytes, HAS_COMPRESSION_STREAMS);
+
+            const gen = txState.txCount[seqToSend]++;
+            const ts = nowMs();
+            txState.sentAt[seqToSend] = ts;
+            lane.send(buildP2PChunkFrame(frameType, seqToSend, body, Math.floor(ts), gen, txSlot));
+
+            const doneBytes = Math.min(file.size, Math.max(nextSeq, txState.cumSeq + 1) * chunkSize);
+            scheduleSendUi(file.name, doneBytes, file.size, startedAt);
+          }
+
+          if (txState.cumSeq >= totalChunks - 1) break;
+        }
+
+        // Uncapped Dual-Broker ECF Relay Pipeline with Entropy-Adaptive Compression
+        if (!hasOpenP2P() && isRelayReady && hasAnyMqttReady()) {
+          const now = nowMs();
+
+          const rackLimit = Math.min(nextSeq - 1, txState.highestSacked - 3);
+          for (let s = txState.cumSeq + 1; s <= rackLimit; s++) {
+            if (!txState.acked[s] && txState.sentAt[s] > 0) {
+              const sid = txState.sentSlot[s];
+              const minWait = sid >= 0 ? Math.max(35, brokerSlots[sid].minRtt * 0.45) : 50;
+              if (now - txState.sentAt[s] > minWait) {
+                retransmitSet.add(s);
+              }
+            }
+          }
+
+          if (nextSeq >= totalChunks) {
+            const unackedTail = [];
+            for (let s = txState.cumSeq + 1; s < totalChunks; s++) {
+              if (!txState.acked[s]) unackedTail.push(s);
+            }
+            if (unackedTail.length > 0 && unackedTail.length <= 4 && getReadyBrokers().length > 1) {
+              for (const s of unackedTail) {
+                if (!txState.tailCloned[s] && now - txState.sentAt[s] > 25) {
+                  txState.tailCloned[s] = 1;
+                  retransmitSet.add(s);
+                }
+              }
+            }
+            for (const s of unackedTail) {
+              const sid = txState.sentSlot[s];
+              const tailRto = sid >= 0 ? Math.max(220, brokerSlots[sid].ewmaRtt * 1.7) : 260;
+              if (txState.sentAt[s] > 0 && now - txState.sentAt[s] > tailRto) {
+                retransmitSet.add(s);
+              }
+            }
+          }
+
+          const batchPromises = [];
+          while (retransmitSet.size > 0 || nextSeq < totalChunks) {
+            let seqToSend;
+            let isRetry = false;
+            if (retransmitSet.size > 0) {
+              seqToSend = retransmitSet.values().next().value;
+              retransmitSet.delete(seqToSend);
+              isRetry = true;
+            } else {
+              while (nextSeq < totalChunks && txState.acked[nextSeq]) nextSeq++;
+              if (nextSeq >= totalChunks) break;
+              seqToSend = nextSeq;
+            }
+
+            const excludeSid = isRetry ? txState.sentSlot[seqToSend] : -1;
+            const slot = pickEcfBrokerSlot(excludeSid) || (isRetry ? pickEcfBrokerSlot(-1) : null);
+            if (!slot) break;
+
+            if (!isRetry) nextSeq += 1;
+            else {
+              const prevSid = txState.sentSlot[seqToSend];
+              if (prevSid >= 0 && prevSid < brokerSlots.length) {
+                if (localSlotInflight[prevSid] > 0) {
+                  localSlotInflight[prevSid] -= 1;
+                  brokerSlots[prevSid].inflight = Math.max(0, brokerSlots[prevSid].inflight - 1);
+                }
+                if (!txState.tailCloned[seqToSend]) {
+                  brokerSlots[prevSid].inflightHi = Math.max(12, Math.floor(brokerSlots[prevSid].cwnd * 0.85));
+                }
+              }
+            }
+
+            let chunkBytes = reader.getChunkSync(seqToSend);
+            if (!chunkBytes) chunkBytes = await reader.getChunk(seqToSend);
+
+            const gen = txState.txCount[seqToSend]++;
+            const ts = nowMs();
+            txState.sentAt[seqToSend] = ts;
+            txState.sentSlot[seqToSend] = slot.id;
+            slot.inflight += 1;
+            localSlotInflight[slot.id] += 1;
+
+            const p = prepareOutgoingPayload(chunkBytes, HAS_COMPRESSION_STREAMS)
+              .then(({ frameType, body }) => encryptChunkWithXorNonce(salt, frameType, seqToSend, Math.floor(ts), gen, txSlot, body))
+              .then((pkt) => mqttPublishSlot(slot, relayOutTopic, pkt, { qos: 0 }))
+              .catch(() => {
+                if (localSlotInflight[slot.id] > 0) {
+                  localSlotInflight[slot.id] -= 1;
+                  slot.inflight = Math.max(0, slot.inflight - 1);
+                }
+              });
+            batchPromises.push(p);
+          }
+
+          if (batchPromises.length > 0) {
+            await Promise.all(batchPromises);
+            const estBytes = Math.min(file.size, Math.max(nextSeq, txState.cumSeq + 1) * chunkSize);
+            scheduleSendUi(file.name, estBytes, file.size, startedAt);
+            if (txState.cumSeq >= totalChunks - 1) break;
+            if (pickEcfBrokerSlot(-1) && (retransmitSet.size > 0 || nextSeq < totalChunks)) {
+              continue;
+            }
+          }
+        }
+
+        if (txState.cumSeq >= totalChunks - 1) break;
+
+        await new Promise((resolve) => {
+          const t = setTimeout(() => {
+            if (txState.wake === resolve) txState.wake = null;
+            resolve();
+          }, 25);
+          txState.wake = () => {
+            clearTimeout(t);
+            resolve();
+          };
+        });
       }
     }
-  }
 
-  await ensureConnected(10000);
-  await sendRelayControl({ type: "file-end", transferId });
-  progressBar.value = 100;
-  percentEl.textContent = "100%";
-}
-
-// === Framed File Receiving ===
-async function handleEncryptedRelayPacket(rawPayload) {
-  if (!sharedAesKey) return;
-  try {
-    const plainBytes = await decryptPacket(rawPayload);
-    handleFramePacket(plainBytes, "relay");
-  } catch (err) {
-    console.error("Relay decrypt error:", err);
+    await ensureConnected(10000);
+    await fileStartPromise;
+    await sendControlMessage({ type: "file-end", transferId }, hasOpenP2P());
+    scheduleSendUi(file.name, file.size, file.size, startedAt);
+  } finally {
+    for (let i = 0; i < brokerSlots.length; i++) {
+      brokerSlots[i].inflight = Math.max(0, brokerSlots[i].inflight - localSlotInflight[i]);
+    }
+    outgoingTransfers.delete(transferId);
   }
 }
 
-function sendAck(transferId, seq, transport) {
-  const ackObj = { type: "chunk-ack", transferId, seq };
-  if (transport === "p2p" && dataConn && dataConn.open) {
-    try { dataConn.send(buildControlFrame(ackObj)); } catch {}
-  } else if (isRelayReady && mqttReady) {
-    sendRelayControl(ackObj).catch(() => {});
+// === Framed File Receiving (Progressive 4 MB Sub-Blob Compaction + Async Decode Gate) ===
+function handleEncryptedRelayPacket(rawPayload) {
+  if (!sharedAesKey || !rawPayload || rawPayload.byteLength < 2) return;
+  const bytes = new Uint8Array(rawPayload.buffer, rawPayload.byteOffset, rawPayload.byteLength);
+  const frameType = bytes[0];
+
+  if (frameType === 0x01) {
+    relayCtrlChain = relayCtrlChain
+      .then(async () => {
+        const plain = await decryptControlPacket(bytes);
+        const jsonStart = plain[0] === 0x01 ? 1 : 0;
+        await handleControlJson(JSON.parse(textDecoder.decode(plain.subarray(jsonStart))), "relay");
+        drainEarlyRelayChunks();
+      })
+      .catch(() => {});
+    return;
+  }
+
+  if (frameType === 0x02 || frameType === 0x03 || frameType === 0x04) {
+    if (bytes.length < 11) return;
+    const txSlot = bytes[10];
+    const transferId = txSlotMap.get(txSlot);
+    const state = transferId ? incomingTransfers.get(transferId) : getRecvState(null);
+    if (!state || !state.salt) {
+      earlyRelayChunks.push(bytes.slice());
+      return;
+    }
+    decodeEncryptedDataPacket(state, bytes, "relay");
   }
 }
 
-function handleFramePacket(bytes, transport) {
+function decodeEncryptedDataPacket(state, bytes, transport) {
+  state.pendingDecodes += 1;
+  decryptChunkWithXorNonce(state.salt, bytes)
+    .then(({ frameType, seq, sentMs32, body }) => decodeBodyAndApply(state, frameType, seq, sentMs32, body, transport))
+    .catch(() => {})
+    .finally(() => {
+      state.pendingDecodes -= 1;
+      if (state.pendingDecodes === 0 && state.decodeDrainResolve) {
+        const fn = state.decodeDrainResolve;
+        state.decodeDrainResolve = null;
+        fn();
+      }
+    });
+}
+
+function drainEarlyRelayChunks() {
+  if (earlyRelayChunks.length === 0) return;
+  const remaining = [];
+  while (earlyRelayChunks.length > 0) {
+    const bytes = earlyRelayChunks.shift();
+    const txSlot = bytes[10];
+    const transferId = txSlotMap.get(txSlot);
+    const state = transferId ? incomingTransfers.get(transferId) : getRecvState(null);
+    if (!state || !state.salt) {
+      remaining.push(bytes);
+      continue;
+    }
+    decodeEncryptedDataPacket(state, bytes, "relay");
+  }
+  for (const r of remaining) earlyRelayChunks.push(r);
+}
+
+function handleP2PRawPacket(bytes) {
   if (!bytes || bytes.length === 0) return;
   const frameType = bytes[0];
 
   if (frameType === 0x01) {
     const msg = JSON.parse(textDecoder.decode(bytes.subarray(1)));
-    if (msg.type === "chunk-ack") {
-      if (pendingAckWaiter && pendingAckWaiter.transferId === msg.transferId && msg.seq >= pendingAckWaiter.seq) {
-        pendingAckWaiter.resolve();
-      }
-      return;
+    handleControlJson(msg, "p2p");
+    return;
+  }
+
+  if (frameType === 0x02 || frameType === 0x03 || frameType === 0x04) {
+    if (bytes.length < 11) return;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const seq = view.getUint32(1, false);
+    const sentMs32 = view.getUint32(5, false);
+    const txSlot = bytes[10];
+    const transferId = txSlotMap.get(txSlot);
+    const state = transferId ? incomingTransfers.get(transferId) : getRecvState(null);
+    if (!state) return;
+    const body = bytes.slice(11);
+    if (frameType === 0x02 || frameType === 0x04) {
+      decodeBodyAndApply(state, frameType, seq, sentMs32, body, "p2p");
+    } else {
+      state.pendingDecodes += 1;
+      decodeBodyAndApply(state, frameType, seq, sentMs32, body, "p2p")
+        .finally(() => {
+          state.pendingDecodes -= 1;
+          if (state.pendingDecodes === 0 && state.decodeDrainResolve) {
+            const fn = state.decodeDrainResolve;
+            state.decodeDrainResolve = null;
+            fn();
+          }
+        });
     }
+  }
+}
 
-    const progressBox = document.getElementById("recvProgressBox");
-    const progressBar = document.getElementById("recvProgress");
-    const fileNameEl = document.getElementById("recvFileName");
-    const percentEl = document.getElementById("recvPercent");
+async function decodeBodyAndApply(state, frameType, seq, sentMs32, body, transport) {
+  if (!state || state.finalized || seq >= state.totalChunks) return;
+  let chunk;
+  if (frameType === 0x02) {
+    chunk = body;
+  } else if (frameType === 0x03) {
+    chunk = await runStreamTransform(body, DecompressionStream);
+  } else if (frameType === 0x04) {
+    if (body.length < 5) return;
+    const fillByte = body[0];
+    const len = new DataView(body.buffer, body.byteOffset, body.byteLength).getUint32(1, false);
+    chunk = new Uint8Array(len);
+    if (fillByte !== 0) chunk.fill(fillByte);
+  } else {
+    return;
+  }
+  handleDecodedChunk(state, seq, sentMs32, chunk, transport);
+}
 
-    if (msg.type === "file-start") {
-      incomingFileInfo = msg;
-      incomingChunks = [];
-      receivedSize = 0;
-      expectedSeq = 0;
-      incomingAckInterval = transport === "p2p" ? P2P_ACK_INTERVAL : RELAY_WINDOW;
+function getRecvState(transferId) {
+  if (transferId && incomingTransfers.has(transferId)) return incomingTransfers.get(transferId);
+  if (legacyRecvId && incomingTransfers.has(legacyRecvId)) return incomingTransfers.get(legacyRecvId);
+  return null;
+}
 
-      progressBox.style.display = "block";
-      fileNameEl.textContent = msg.name;
-      progressBar.value = 0;
-      percentEl.textContent = "0%";
-    } else if (msg.type === "file-end") {
-      if (!incomingFileInfo) return;
-      const blob = new Blob(incomingChunks, { type: incomingFileInfo.mime || "application/octet-stream" });
-      addFileToList(incomingFileInfo.name, incomingFileInfo.size, incomingFileInfo.mime, blob, "受信");
+function hasRecvBit(state, seq) {
+  if (seq < 0 || seq >= state.totalChunks) return false;
+  return (state.bitmap[seq >>> 3] & (1 << (seq & 7))) !== 0;
+}
 
-      incomingFileInfo = null;
-      incomingChunks = [];
-      receivedSize = 0;
-      expectedSeq = 0;
-      setTimeout(() => { progressBox.style.display = "none"; }, 1400);
+function setRecvBit(state, seq) {
+  state.bitmap[seq >>> 3] |= (1 << (seq & 7));
+}
+
+function compactContiguousPrefix(state) {
+  while (state.cumSeq - state.compactWatermark + 1 >= COMPACT_CHUNK_BATCH) {
+    const end = state.compactWatermark + COMPACT_CHUNK_BATCH;
+    const slice = [];
+    for (let i = state.compactWatermark; i < end; i++) {
+      if (state.chunks[i]) {
+        slice.push(state.chunks[i]);
+        state.chunks[i] = null;
+      }
+    }
+    if (slice.length > 0) {
+      state.compactedBlobs.push(new Blob(slice));
+    }
+    state.compactWatermark = end;
+  }
+}
+
+function emitSack(state, transport) {
+  const now = nowMs();
+  let lo = 0;
+  let hi = 0;
+  for (let bit = 0; bit < 64; bit++) {
+    const s = state.cumSeq + 1 + bit;
+    if (s >= state.totalChunks) break;
+    if (hasRecvBit(state, s)) {
+      if (bit < 32) lo |= (1 << bit);
+      else hi |= (1 << (bit - 32));
+    }
+  }
+  state.lastSackAt = now;
+  sendControlMessage({
+    type: "sack",
+    transferId: state.meta.transferId,
+    cumSeq: state.cumSeq,
+    bitmapHi: hi >>> 0,
+    bitmapLo: lo >>> 0,
+    echoTs: state.lastSenderTs || 0
+  }, transport === "p2p");
+}
+
+async function handleControlJson(msg, transport) {
+  if (msg.type === "sack" || msg.type === "chunk-ack") {
+    const tx = outgoingTransfers.get(msg.transferId);
+    if (tx && typeof tx.onSack === "function") {
+      tx.onSack(msg);
+    } else if (tx && tx.resolveDone) {
+      tx.resolveDone();
     }
     return;
   }
 
-  if (frameType === 0x02) {
-    if (!incomingFileInfo || bytes.length < 5) return;
-    const seq = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(1, false);
-    const chunk = bytes.slice(5);
+  if (msg.type === "resume-query") {
+    const state = incomingTransfers.get(msg.transferId);
+    if (state) emitSack(state, transport);
+    return;
+  }
 
-    if (seq === expectedSeq) {
-      incomingChunks.push(chunk);
-      receivedSize += chunk.byteLength;
-      expectedSeq = seq + 1;
+  if (msg.type === "file-start") {
+    if (incomingTransfers.has(msg.transferId)) return;
+    const totalChunks = typeof msg.totalChunks === "number"
+      ? msg.totalChunks
+      : (msg.size === 0 ? 0 : Math.ceil(msg.size / (msg.chunkSize || RELAY_CHUNK_SIZE)));
+    const state = {
+      meta: msg,
+      salt: msg.saltB64 ? base64ToBytes(msg.saltB64) : null,
+      totalChunks,
+      chunks: new Array(totalChunks),
+      compactedBlobs: [],
+      compactWatermark: 0,
+      bitmap: new Uint8Array(Math.ceil(totalChunks / 8)),
+      receivedCount: 0,
+      receivedBytes: 0,
+      cumSeq: -1,
+      pendingDecodes: 0,
+      decodeDrainResolve: null,
+      startedAt: nowMs(),
+      lastSackAt: 0,
+      lastSenderTs: 0,
+      sinceSack: 0,
+      finalized: false
+    };
+    incomingTransfers.set(msg.transferId, state);
+    if (typeof msg.txSlot === "number") txSlotMap.set(msg.txSlot, msg.transferId);
+    legacyRecvId = msg.transferId;
 
-      const percent = incomingFileInfo.size > 0
-        ? Math.min(100, Math.round((receivedSize / incomingFileInfo.size) * 100))
-        : 100;
-      document.getElementById("recvProgress").value = percent;
-      document.getElementById("recvPercent").textContent = `${percent}%`;
-    } else if (seq > expectedSeq) {
-      return;
+    document.getElementById("recvProgressBox").style.display = "block";
+    scheduleRecvUi(msg.name, 0, msg.size, state.startedAt);
+    return;
+  }
+
+  if (msg.type === "file-end") {
+    const state = getRecvState(msg.transferId);
+    if (!state || state.finalized) return;
+    if (state.pendingDecodes > 0) {
+      await new Promise((resolve) => { state.decodeDrainResolve = resolve; });
     }
+    if (state.finalized) return;
+    state.finalized = true;
 
-    if (((seq + 1) % incomingAckInterval === 0) || receivedSize >= incomingFileInfo.size) {
-      sendAck(incomingFileInfo.transferId, expectedSeq - 1, transport);
+    const parts = state.compactedBlobs.slice();
+    for (let i = state.compactWatermark; i < state.totalChunks; i++) {
+      if (state.chunks[i]) {
+        parts.push(state.chunks[i]);
+        state.chunks[i] = null;
+      }
     }
+    const blob = new Blob(parts, { type: state.meta.mime || "application/octet-stream" });
+    addFileToList(state.meta.name, state.meta.size, state.meta.mime, blob, "受信");
+
+    incomingTransfers.delete(state.meta.transferId);
+    if (typeof state.meta.txSlot === "number" && txSlotMap.get(state.meta.txSlot) === state.meta.transferId) {
+      txSlotMap.delete(state.meta.txSlot);
+    }
+    if (legacyRecvId === state.meta.transferId) legacyRecvId = null;
+
+    scheduleRecvUi(state.meta.name, state.meta.size, state.meta.size, state.startedAt);
+    setTimeout(() => { document.getElementById("recvProgressBox").style.display = "none"; }, 1400);
+  }
+}
+
+function handleDecodedChunk(state, seq, sentMs32, chunk, transport) {
+  if (!state || state.finalized || seq >= state.totalChunks) return;
+  if (sentMs32 > 0) state.lastSenderTs = sentMs32;
+  const outOfOrder = seq > state.cumSeq + 1;
+
+  if (!hasRecvBit(state, seq)) {
+    state.chunks[seq] = chunk;
+    setRecvBit(state, seq);
+    state.receivedCount += 1;
+    state.receivedBytes += chunk.byteLength;
+    while (hasRecvBit(state, state.cumSeq + 1)) {
+      state.cumSeq += 1;
+    }
+    compactContiguousPrefix(state);
+    scheduleRecvUi(state.meta.name, state.receivedBytes, state.meta.size, state.startedAt);
+  }
+
+  state.sinceSack += 1;
+  const now = nowMs();
+  if (
+    state.receivedCount >= state.totalChunks ||
+    (outOfOrder && now - state.lastSackAt > 12) ||
+    (state.sinceSack >= SACK_INTERVAL && now - state.lastSackAt > 4)
+  ) {
+    state.sinceSack = 0;
+    emitSack(state, transport);
   }
 }
 
@@ -2084,8 +2848,8 @@ function setupUIEvents() {
   });
 
   disconnectBtn.addEventListener("click", () => {
-    if (pairedPeerId && mqttClient && mqttReady) {
-      mqttPublish(`lanp2p-v2/inbox/${pairedPeerId}`, JSON.stringify({ kind: "bye", from: myId }), { qos: 1 }).catch(() => {});
+    if (pairedPeerId && hasAnyMqttReady()) {
+      publishOnBestBroker(`lanp2p-v2/inbox/${pairedPeerId}`, JSON.stringify({ kind: "bye", from: myId }), { qos: 1 }).catch(() => {});
     }
     resetToConnectPanel("切断しました");
   });
