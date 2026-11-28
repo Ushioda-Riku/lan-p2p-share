@@ -7,6 +7,7 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="referrer" content="no-referrer">
   <title>AirShare</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a84ff'/%3E%3Cpath d='M32 16v26M21 27l11-11 11 11M18 46h28' fill='none' stroke='%23fff' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/mqtt@5.10.3/dist/mqtt.min.js" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" crossorigin="anonymous"></script>
@@ -941,13 +942,19 @@ let nativeMakingOffer = false;
 let nativeIgnoreOffer = false;
 let nativeRtcSessionId = "";
 let pendingRemoteCandidates = [];
+const earlyIceBySession = new Map();
+let localIceBatch = [];
+let localIceFlushTimer = null;
+let nativeOfferRetryTimer = null;
+let nativeOfferRetryCount = 0;
 let peerUnavailableCount = 0;
 
 const brokerSlots = [
-  { id: 0, brokerIdx: 0, client: null, ready: false, inflight: 0, cwnd: 10, inflightHi: 22, minRtt: 120, ewmaRtt: 120, lastCongestionAt: 0, nextPathPn: 1, nextSendAt: 0 },
-  { id: 1, brokerIdx: 1, client: null, ready: false, inflight: 0, cwnd: 10, inflightHi: 22, minRtt: 120, ewmaRtt: 120, lastCongestionAt: 0, nextPathPn: 1, nextSendAt: 0 }
+  { id: 0, brokerIdx: 0, client: null, ready: false, inflight: 0, cwnd: 10, inflightHi: 22, minRtt: 120, ewmaRtt: 120, lastCongestionAt: 0, nextPathPn: 1, nextSendAt: 0, lossStreak: 0, lastRotateAt: 0, coolUntil: 0 },
+  { id: 1, brokerIdx: 1, client: null, ready: false, inflight: 0, cwnd: 10, inflightHi: 22, minRtt: 120, ewmaRtt: 120, lastCongestionAt: 0, nextPathPn: 1, nextSendAt: 0, lossStreak: 0, lastRotateAt: 0, coolUntil: 0 },
+  { id: 2, brokerIdx: 2, client: null, ready: false, inflight: 0, cwnd: 10, inflightHi: 22, minRtt: 120, ewmaRtt: 120, lastCongestionAt: 0, nextPathPn: 1, nextSendAt: 0, lossStreak: 0, lastRotateAt: 0, coolUntil: 0 }
 ];
-let nextFailoverBrokerIdx = 2;
+let nextFailoverBrokerIdx = 0;
 let currentInboxTopic = "";
 
 let connState = "idle";
@@ -1071,7 +1078,11 @@ function normalizeCode(str) {
 }
 
 function getReadyBrokers() {
-  return brokerSlots.filter((s) => s.ready && s.client && s.client.connected);
+  const ready = brokerSlots.filter((s) => s.ready && s.client && s.client.connected);
+  if (ready.length <= 1) return ready;
+  const now = nowMs();
+  const warm = ready.filter((s) => !(s.coolUntil > now));
+  return warm.length > 0 ? warm : ready;
 }
 
 function hasAnyMqttReady() {
@@ -1731,6 +1742,7 @@ function startBrokerSlot(slot) {
     settled = true;
     clearTimeout(failoverTimer);
     slot.ready = true;
+    slot.lossStreak = 0;
     updateReadyIndicator();
 
     const inbox = `lanp2p-v2/inbox/${myId}`;
@@ -1796,6 +1808,29 @@ function startBrokerSlot(slot) {
       startBrokerSlot(slot);
     }
   });
+}
+
+function rotateDegradedBrokerSlot(slot) {
+  if (!slot) return;
+  const now = nowMs();
+  if (now - slot.lastRotateAt < 6000) return;
+  slot.lastRotateAt = now;
+  slot.coolUntil = now + 15000;
+  slot.lossStreak = 0;
+  slot.ready = false;
+  slot.inflight = 0;
+  slot.nextSendAt = 0;
+  slot.cwnd = 10;
+  slot.inflightHi = 22;
+  const oldClient = slot.client;
+  slot.client = null;
+  if (oldClient) {
+    try { oldClient.end(true); } catch {}
+  }
+  for (const tx of outgoingTransfers.values()) {
+    if (tx.onBrokerSlotDropped) tx.onBrokerSlotDropped(slot.id);
+  }
+  startBrokerSlot(slot);
 }
 
 async function subscribeAllBrokers(topic) {
@@ -1898,6 +1933,9 @@ async function handleInboxMessage(msg) {
       await subscribeAllBrokers(relayInTopic);
       isRelayReady = true;
       enterConnectedState(msg.from, "relay");
+      if (HAS_NATIVE_RTC && !hasOpenP2P()) {
+        sendControlMessage({ type: "rtc-ready" }, false).catch(() => {});
+      }
     } catch {}
   } else if (msg.kind === "busy") {
     if (msg.from === connectingTargetId) {
@@ -1970,7 +2008,46 @@ function initPeerJS() {
   });
 }
 
+function clearNativeOfferRetry() {
+  if (nativeOfferRetryTimer) {
+    clearTimeout(nativeOfferRetryTimer);
+    nativeOfferRetryTimer = null;
+  }
+  nativeOfferRetryCount = 0;
+}
+
+function scheduleNativeOfferRetry(remoteId) {
+  if (nativeOfferRetryTimer || !HAS_NATIVE_RTC || !remoteId || hasOpenP2P() || myId >= remoteId) return;
+  if (nativeOfferRetryCount >= 4) return;
+  nativeOfferRetryTimer = setTimeout(() => {
+    nativeOfferRetryTimer = null;
+    if (!pairedPeerId || pairedPeerId !== remoteId || hasOpenP2P() || !isRelayReady || !hasAnyMqttReady()) return;
+    nativeOfferRetryCount += 1;
+    startNativeWebRtc(remoteId, true);
+  }, 3000);
+}
+
+function flushLocalIceBatch(sessionId) {
+  if (localIceFlushTimer) {
+    clearTimeout(localIceFlushTimer);
+    localIceFlushTimer = null;
+  }
+  const cands = localIceBatch.splice(0, localIceBatch.length);
+  if (cands.length === 0 || !sessionId || nativeRtcSessionId !== sessionId) return;
+  if (!isRelayReady || !hasAnyMqttReady()) return;
+  sendControlMessage({
+    type: "rtc-ice-batch",
+    sessionId,
+    candidates: cands
+  }, false).catch(() => {});
+}
+
 function cleanupNativePc() {
+  if (localIceFlushTimer) {
+    clearTimeout(localIceFlushTimer);
+    localIceFlushTimer = null;
+  }
+  localIceBatch = [];
   pendingRemoteCandidates = [];
   nativeMakingOffer = false;
   nativeIgnoreOffer = false;
@@ -2024,6 +2101,7 @@ function attachNativeDataChannel(dc, pc, remoteId, isInitiator) {
     dc.bufferedAmountLowThreshold = P2P_LOW_WATER;
     isDirectP2P = true;
     clearSilentP2PRetry();
+    clearNativeOfferRetry();
     enterConnectedState(remoteId, "p2p", isInitiator);
   };
 
@@ -2059,6 +2137,11 @@ function ensureNativePc(remoteId, sessionId, isInitiator) {
   if (nativePc && nativeRtcSessionId === sessionId) return nativePc;
   cleanupNativePc();
   nativeRtcSessionId = sessionId;
+  const early = earlyIceBySession.get(sessionId);
+  if (early) {
+    pendingRemoteCandidates.push(...early);
+    earlyIceBySession.delete(sessionId);
+  }
   const pc = new RTCPeerConnection({
     iceServers: [
       { urls: "stun:stun.l.google.com:19302" },
@@ -2068,13 +2151,18 @@ function ensureNativePc(remoteId, sessionId, isInitiator) {
   nativePc = pc;
 
   pc.onicecandidate = (ev) => {
-    if (nativePc !== pc || !ev.candidate || !isRelayReady || !hasAnyMqttReady()) return;
-    const cand = ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate;
-    sendControlMessage({
-      type: "rtc-ice",
-      sessionId: nativeRtcSessionId,
-      candidate: cand
-    }, false).catch(() => {});
+    if (nativePc !== pc || !isRelayReady || !hasAnyMqttReady()) return;
+    if (ev.candidate) {
+      const cand = ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate;
+      localIceBatch.push(cand);
+      if (localIceBatch.length >= 6) {
+        flushLocalIceBatch(sessionId);
+      } else if (!localIceFlushTimer) {
+        localIceFlushTimer = setTimeout(() => flushLocalIceBatch(sessionId), 120);
+      }
+    } else {
+      flushLocalIceBatch(sessionId);
+    }
   };
 
   pc.ondatachannel = (ev) => {
@@ -2129,6 +2217,7 @@ async function startNativeWebRtc(remoteId, force = false) {
       sessionId: sid,
       description: sdp
     }, false);
+    scheduleNativeOfferRetry(remoteId);
   } catch {} finally {
     nativeMakingOffer = false;
   }
@@ -2139,6 +2228,9 @@ async function handleNativeRtcControl(msg) {
   const remoteId = pairedPeerId;
   if (msg.type === "rtc-sdp" && msg.description) {
     const desc = msg.description;
+    if (nativePc && nativeRtcSessionId === msg.sessionId && nativePc.remoteDescription && nativePc.remoteDescription.type === desc.type) {
+      return;
+    }
     const polite = myId > remoteId;
     if (desc.type === "offer") {
       const collision = nativePc && (nativeMakingOffer || nativePc.signalingState !== "stable");
@@ -2148,6 +2240,11 @@ async function handleNativeRtcControl(msg) {
       if (!pc) return;
       try {
         await pc.setRemoteDescription(desc);
+        const queuedEarly = earlyIceBySession.get(msg.sessionId);
+        if (queuedEarly) {
+          pendingRemoteCandidates.push(...queuedEarly);
+          earlyIceBySession.delete(msg.sessionId);
+        }
         while (pendingRemoteCandidates.length > 0) {
           const c = pendingRemoteCandidates.shift();
           try { await pc.addIceCandidate(c); } catch {}
@@ -2165,6 +2262,11 @@ async function handleNativeRtcControl(msg) {
     } else if (desc.type === "answer" && nativePc && nativeRtcSessionId === msg.sessionId) {
       try {
         await nativePc.setRemoteDescription(desc);
+        const queuedEarly = earlyIceBySession.get(msg.sessionId);
+        if (queuedEarly) {
+          pendingRemoteCandidates.push(...queuedEarly);
+          earlyIceBySession.delete(msg.sessionId);
+        }
         while (pendingRemoteCandidates.length > 0) {
           const c = pendingRemoteCandidates.shift();
           try { await nativePc.addIceCandidate(c); } catch {}
@@ -2173,14 +2275,32 @@ async function handleNativeRtcControl(msg) {
     }
     return;
   }
-  if (msg.type === "rtc-ice" && msg.candidate && nativePc && nativeRtcSessionId === msg.sessionId) {
-    try {
-      if (nativePc.remoteDescription) {
-        await nativePc.addIceCandidate(msg.candidate);
-      } else {
-        pendingRemoteCandidates.push(msg.candidate);
+  if (msg.type === "rtc-ice" || msg.type === "rtc-ice-batch") {
+    const cands = msg.type === "rtc-ice-batch"
+      ? (Array.isArray(msg.candidates) ? msg.candidates : [])
+      : (msg.candidate ? [msg.candidate] : []);
+    if (cands.length === 0) return;
+    if (nativePc && nativeRtcSessionId === msg.sessionId) {
+      for (const cand of cands) {
+        try {
+          if (nativePc.remoteDescription) {
+            await nativePc.addIceCandidate(cand);
+          } else {
+            pendingRemoteCandidates.push(cand);
+          }
+        } catch {}
       }
-    } catch {}
+    } else {
+      let bucket = earlyIceBySession.get(msg.sessionId);
+      if (!bucket) {
+        if (earlyIceBySession.size >= 12) {
+          earlyIceBySession.delete(earlyIceBySession.keys().next().value);
+        }
+        bucket = [];
+        earlyIceBySession.set(msg.sessionId, bucket);
+      }
+      bucket.push(...cands);
+    }
   }
 }
 
@@ -2488,7 +2608,7 @@ function enterConnectedState(remoteId, mode, fromLocalInitiator = false) {
       if (pairedPeerId === remoteId && isRelayReady && !hasOpenP2P()) {
         startNativeWebRtc(remoteId);
       }
-    }, 40);
+    }, 600);
   }
 
   setConnectingUI(false);
@@ -2556,6 +2676,8 @@ function updateTransferStatus() {
 function resetToConnectPanel(statusMsg = "") {
   clearConnectionTimers();
   clearSilentP2PRetry();
+  clearNativeOfferRetry();
+  earlyIceBySession.clear();
   connState = "idle";
   connectingTargetId = null;
   pairedPeerId = null;
@@ -2768,7 +2890,15 @@ async function sendControlMessage(obj, preferP2P = true) {
     try {
       const pkt = await encryptControlPacket(frame);
       const t = obj && obj.type;
-      if (t === "resume-query" || (obj && obj.redundancy)) {
+      if (t === "sack") {
+        if (obj && obj.redundancy) {
+          await publishOnAllReadyBrokers(relayOutTopic, pkt, { qos: 0 });
+        } else {
+          await publishOnBestBroker(relayOutTopic, pkt, { qos: 0 });
+        }
+      } else if (t === "rtc-ice" || t === "rtc-ice-batch") {
+        await publishOnAllReadyBrokers(relayOutTopic, pkt, { qos: 0 });
+      } else if (t === "resume-query" || t === "rtc-sdp" || t === "rtc-ready" || (obj && obj.redundancy)) {
         await publishOnAllReadyBrokers(relayOutTopic, pkt, { qos: 1 });
       } else {
         await publishOnBestBroker(relayOutTopic, pkt, { qos: 1 });
@@ -2891,13 +3021,13 @@ function getMqttBufferedAmount(slot) {
   return ws && typeof ws.bufferedAmount === "number" ? ws.bufferedAmount : 0;
 }
 
-function pickEcfBrokerSlot(excludeSlotId = -1) {
+function pickEcfBrokerSlot(excludeSlotId = -1, bypassCwnd = false) {
   const ready = getReadyBrokers();
   let best = null;
   let bestScore = Infinity;
   for (const slot of ready) {
     if (slot.id === excludeSlotId) continue;
-    if (slot.inflight >= slot.cwnd) continue;
+    if (!bypassCwnd && slot.inflight >= slot.cwnd) continue;
     if (getMqttBufferedAmount(slot) >= 128 * 1024) continue;
     const score = ((slot.inflight + 1) * slot.ewmaRtt) / Math.max(1, slot.cwnd);
     if (score < bestScore) {
@@ -2938,9 +3068,10 @@ async function sendFileUnified(file, startedAt, preReader = null) {
     salt,
     cumSeq: -1,
     highestSacked: -1,
+    maxSackSeq: 0,
     ackedCount: 0,
     uniqueDispatched: 0,
-    grantSeq: totalChunks > 0 ? Math.min(totalChunks - 1, (startedOnP2P ? 256 : 64) - 1) : -1,
+    grantSeq: totalChunks > 0 ? Math.min(totalChunks - 1, (startedOnP2P ? 224 : 56) - 1) : -1,
     lastProgressAt: nowMs(),
     lastP2PAckAt: nowMs(),
     lastResumeQueryAt: 0,
@@ -2988,8 +3119,17 @@ async function sendFileUnified(file, startedAt, preReader = null) {
       const prevCum = this.cumSeq;
       const prevAcked = this.ackedCount;
       const cum = Math.min(totalChunks - 1, msg.cumSeq);
-      if (typeof msg.grantSeq === "number") {
-        this.grantSeq = Math.max(this.grantSeq, Math.min(totalChunks - 1, msg.grantSeq));
+      const maxHorizon = hasOpenP2P() ? 224 : 56;
+      const nextCum = Math.max(this.cumSeq, cum);
+      const hasSackSeq = typeof msg.sackSeq === "number";
+      const isFreshSack = hasSackSeq ? msg.sackSeq > this.maxSackSeq : cum >= this.cumSeq;
+      if (hasSackSeq && msg.sackSeq > this.maxSackSeq) {
+        this.maxSackSeq = msg.sackSeq;
+      }
+      if (typeof msg.grantSeq === "number" && (isFreshSack || cum >= this.cumSeq)) {
+        this.grantSeq = Math.min(totalChunks - 1, Math.max(-1, nextCum) + maxHorizon, Math.max(this.grantSeq, msg.grantSeq));
+      } else {
+        this.grantSeq = Math.min(totalChunks - 1, this.grantSeq, Math.max(-1, nextCum) + maxHorizon);
       }
 
       const creditSlot = (seq, rttSample) => {
@@ -2998,6 +3138,7 @@ async function sendFileUnified(file, startedAt, preReader = null) {
           const pn = this.sentPathPn[seq];
           if (pn > this.highestAckedPathPn[sid]) this.highestAckedPathPn[sid] = pn;
           const slot = brokerSlots[sid];
+          slot.lossStreak = 0;
           if (localSlotInflight[sid] > 0) {
             localSlotInflight[sid] -= 1;
             slot.inflight = Math.max(0, slot.inflight - 1);
@@ -3019,7 +3160,7 @@ async function sendFileUnified(file, startedAt, preReader = null) {
         }
       };
 
-      const rttSample = typeof msg.echoTs === "number" && msg.echoTs > 0
+      const rttSample = isFreshSack && typeof msg.echoTs === "number" && msg.echoTs > 0
         ? ((Math.floor(now) - msg.echoTs) >>> 0)
         : 0;
 
@@ -3039,15 +3180,34 @@ async function sendFileUnified(file, startedAt, preReader = null) {
         this.highestSacked = Math.max(this.highestSacked, cum);
       }
 
-      const hi = msg.bitmapHi >>> 0;
-      const lo = msg.bitmapLo >>> 0;
-      for (let bit = 0; bit < 64; bit++) {
-        const seq = this.cumSeq + 1 + bit;
-        if (seq >= totalChunks) break;
-        const isSet = bit < 32 ? ((lo >>> bit) & 1) : ((hi >>> (bit - 32)) & 1);
-        if (isSet) {
-          markAcked(seq);
-          if (seq > this.highestSacked) this.highestSacked = seq;
+      if (Array.isArray(msg.sackWords) && msg.sackWords.length > 0) {
+        const wordLimit = Math.min(8, msg.sackWords.length);
+        for (let w = 0; w < wordLimit; w++) {
+          const word = msg.sackWords[w] >>> 0;
+          if (!word) continue;
+          const base = cum + 1 + (w << 5);
+          for (let b = 0; b < 32; b++) {
+            const seq = base + b;
+            if (seq >= totalChunks) break;
+            if (seq <= this.cumSeq) continue;
+            if ((word >>> b) & 1) {
+              markAcked(seq);
+              if (seq > this.highestSacked) this.highestSacked = seq;
+            }
+          }
+        }
+      } else {
+        const hi = msg.bitmapHi >>> 0;
+        const lo = msg.bitmapLo >>> 0;
+        for (let bit = 0; bit < 64; bit++) {
+          const seq = cum + 1 + bit;
+          if (seq >= totalChunks) break;
+          if (seq <= this.cumSeq) continue;
+          const isSet = bit < 32 ? ((lo >>> bit) & 1) : ((hi >>> (bit - 32)) & 1);
+          if (isSet) {
+            markAcked(seq);
+            if (seq > this.highestSacked) this.highestSacked = seq;
+          }
         }
       }
 
@@ -3068,6 +3228,23 @@ async function sendFileUnified(file, startedAt, preReader = null) {
     txState.resolveDone = res;
     txState.rejectDone = rej;
   });
+  const releaseChunkSlot = (seq, recordLoss = false) => {
+    const sid = txState.sentSlot[seq];
+    if (sid >= 0 && sid < brokerSlots.length) {
+      if (localSlotInflight[sid] > 0) {
+        localSlotInflight[sid] -= 1;
+        brokerSlots[sid].inflight = Math.max(0, brokerSlots[sid].inflight - 1);
+      }
+      txState.sentSlot[seq] = -2;
+      if (recordLoss) {
+        brokerSlots[sid].lossStreak += 1;
+        if (brokerSlots[sid].lossStreak >= 6 && getReadyBrokers().length > 1) {
+          rotateDegradedBrokerSlot(brokerSlots[sid]);
+        }
+      }
+    }
+    return sid;
+  };
   outgoingTransfers.set(transferId, txState);
 
   try {
@@ -3131,8 +3308,21 @@ async function sendFileUnified(file, startedAt, preReader = null) {
         }
 
         if (txState.cumSeq < totalChunks - 1 && (loopNow - txState.lastProgressAt) > 300) {
-          if (txState.grantSeq < totalChunks - 1) {
-            txState.grantSeq = Math.min(totalChunks - 1, txState.grantSeq + 8);
+          const maxHorizon = hasOpenP2P() ? 224 : 56;
+          const capGrant = Math.min(totalChunks - 1, Math.max(-1, txState.cumSeq) + maxHorizon);
+          if (txState.grantSeq < capGrant) {
+            txState.grantSeq = Math.min(capGrant, txState.grantSeq + 8);
+          } else {
+            txState.grantSeq = Math.min(totalChunks - 1, capGrant);
+          }
+          if (txState.ackedCount > 0) {
+            const headSeq = txState.cumSeq + 1;
+            if (headSeq >= 0 && headSeq < totalChunks && !txState.acked[headSeq]) {
+              const timedOut = txState.sentAt[headSeq] > 0 && (loopNow - txState.sentAt[headSeq]) > 280;
+              releaseChunkSlot(headSeq, timedOut);
+              txState.sentAt[headSeq] = 0;
+              retransmitSet.add(headSeq);
+            }
           }
           if (loopNow - txState.lastResumeQueryAt > 350) {
             txState.lastResumeQueryAt = loopNow;
@@ -3150,7 +3340,7 @@ async function sendFileUnified(file, startedAt, preReader = null) {
 
         // Seamless mid-file P2P cutover OR primary P2P 3-lane streaming
         if (hasOpenP2P()) {
-          const p2pScanEnd = Math.min(totalChunks - 1, Math.max(p2pCursor - 1, txState.grantSeq), txState.cumSeq + 64);
+          const p2pScanEnd = Math.min(totalChunks - 1, Math.max(p2pCursor - 1, txState.grantSeq), txState.cumSeq + 256);
           const windowStalled = p2pCursor >= totalChunks || p2pCursor > txState.grantSeq;
           for (let s = txState.cumSeq + 1; s <= p2pScanEnd; s++) {
             if (!txState.acked[s] && txState.sentAt[s] > 0) {
@@ -3221,28 +3411,28 @@ async function sendFileUnified(file, startedAt, preReader = null) {
           const now = nowMs();
 
           // MPNS per-path RACK + per-chunk RTO fast retransmit (prevents cwnd=inflight deadlock on lost SACKs)
-          const rackScanEnd = Math.min(totalChunks - 1, txState.grantSeq, txState.cumSeq + 64);
+          const rackScanEnd = Math.min(totalChunks - 1, Math.max(txState.grantSeq, txState.uniqueDispatched - 1), txState.cumSeq + 256);
           for (let s = txState.cumSeq + 1; s <= rackScanEnd; s++) {
             if (!txState.acked[s] && txState.dispatched[s] && txState.sentAt[s] > 0) {
               const sid = txState.sentSlot[s];
               const age = now - txState.sentAt[s];
               let shouldRequeue = false;
+              let timedOut = false;
               if (sid >= 0 && sid < brokerSlots.length && txState.highestAckedPathPn[sid] > txState.sentPathPn[s] + 2) {
                 const minWait = Math.max(30, brokerSlots[sid].minRtt * 0.35);
                 if (age > minWait) shouldRequeue = true;
               }
               const rtoMs = sid >= 0 ? Math.max(300, brokerSlots[sid].ewmaRtt * 2.2) : 350;
-              if (age > rtoMs) shouldRequeue = true;
+              if (age > rtoMs) {
+                shouldRequeue = true;
+                timedOut = true;
+              }
               if (shouldRequeue) {
                 if (sid >= 0 && sid < brokerSlots.length) {
-                  if (localSlotInflight[sid] > 0) {
-                    localSlotInflight[sid] -= 1;
-                    brokerSlots[sid].inflight = Math.max(0, brokerSlots[sid].inflight - 1);
-                  }
                   if (!txState.tailCloned[s] && age <= rtoMs) {
                     brokerSlots[sid].inflightHi = Math.max(8, Math.floor(brokerSlots[sid].cwnd * 0.85));
                   }
-                  txState.sentSlot[s] = -2;
+                  releaseChunkSlot(s, timedOut);
                 }
                 retransmitSet.add(s);
               }
@@ -3266,13 +3456,7 @@ async function sendFileUnified(file, startedAt, preReader = null) {
               const sid = txState.sentSlot[s];
               const tailRto = sid >= 0 ? Math.max(220, brokerSlots[sid].ewmaRtt * 1.7) : 260;
               if (txState.sentAt[s] > 0 && now - txState.sentAt[s] > tailRto) {
-                if (sid >= 0 && sid < brokerSlots.length) {
-                  if (localSlotInflight[sid] > 0) {
-                    localSlotInflight[sid] -= 1;
-                    brokerSlots[sid].inflight = Math.max(0, brokerSlots[sid].inflight - 1);
-                  }
-                  txState.sentSlot[s] = -2;
-                }
+                releaseChunkSlot(s, true);
                 retransmitSet.add(s);
               }
             }
@@ -3295,7 +3479,10 @@ async function sendFileUnified(file, startedAt, preReader = null) {
             if (retransmitSet.size > 0) {
               seqToSend = retransmitSet.values().next().value;
               const excludeSid = txState.sentSlot[seqToSend];
-              slot = pickEcfBrokerSlot(excludeSid) || pickEcfBrokerSlot(-1);
+              slot = pickEcfBrokerSlot(excludeSid, false) || pickEcfBrokerSlot(-1, false);
+              if (!slot && seqToSend <= txState.cumSeq + 4) {
+                slot = pickEcfBrokerSlot(excludeSid, true) || pickEcfBrokerSlot(-1, true);
+              }
               if (!slot) break;
               retransmitSet.delete(seqToSend);
               isRetry = true;
@@ -3725,30 +3912,35 @@ function compactContiguousPrefix(state) {
 
 function emitSack(state, transport, forceRedundant = false) {
   const now = nowMs();
-  let lo = 0;
-  let hi = 0;
-  for (let bit = 0; bit < 64; bit++) {
+  const sackWords = [0, 0, 0, 0, 0, 0, 0, 0];
+  let highestOffset = 0;
+  for (let bit = 0; bit < 256; bit++) {
     const s = state.cumSeq + 1 + bit;
     if (s >= state.totalChunks) break;
     if (hasRecvBit(state, s)) {
-      if (bit < 32) lo |= (1 << bit);
-      else hi |= (1 << (bit - 32));
+      const w = bit >>> 5;
+      sackWords[w] = (sackWords[w] | (1 << (bit & 31))) >>> 0;
+      highestOffset = w + 1;
     }
   }
+  const trimmedWords = sackWords.slice(0, Math.max(2, highestOffset));
   state.lastSackAt = now;
-  const rxBudget = transport === "p2p" ? 192 : 96;
+  const rxBudget = transport === "p2p" ? 224 : 56;
   const grantWindow = Math.max(24, rxBudget - state.pendingDecodes * 2);
   const grantSeq = state.totalChunks > 0
     ? Math.min(state.totalChunks - 1, Math.max(-1, state.cumSeq) + grantWindow)
     : -1;
   const unchangedCum = state.lastEmittedCumSeq === state.cumSeq;
   state.lastEmittedCumSeq = state.cumSeq;
+  const sackSeq = (state.nextSackSeq = (state.nextSackSeq || 0) + 1);
   sendControlMessage({
     type: "sack",
     transferId: state.meta.transferId,
+    sackSeq,
     cumSeq: state.cumSeq,
-    bitmapHi: hi >>> 0,
-    bitmapLo: lo >>> 0,
+    bitmapHi: (sackWords[1] || 0) >>> 0,
+    bitmapLo: (sackWords[0] || 0) >>> 0,
+    sackWords: trimmedWords,
     grantSeq,
     echoTs: state.lastSenderTs || 0,
     redundancy: Boolean(forceRedundant || unchangedCum)
@@ -3763,6 +3955,7 @@ function emitCompletedSack(transferId, totalChunks, transport) {
     cumSeq: cum,
     bitmapHi: 0,
     bitmapLo: 0,
+    sackWords: [],
     grantSeq: cum,
     echoTs: 0,
     redundancy: true
@@ -3803,7 +3996,15 @@ function finalizeIncomingTransfer(state) {
 }
 
 async function handleControlJson(msg, transport) {
-  if (msg.type === "rtc-sdp" || msg.type === "rtc-ice") {
+  if (msg.type === "rtc-ready") {
+    if (HAS_NATIVE_RTC && pairedPeerId && !hasOpenP2P() && myId < pairedPeerId) {
+      if (!nativePc || !nativePc.remoteDescription) {
+        startNativeWebRtc(pairedPeerId, true);
+      }
+    }
+    return;
+  }
+  if (msg.type === "rtc-sdp" || msg.type === "rtc-ice" || msg.type === "rtc-ice-batch") {
     await handleNativeRtcControl(msg);
     return;
   }
